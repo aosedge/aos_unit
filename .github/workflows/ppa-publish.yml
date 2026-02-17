@@ -1,0 +1,108 @@
+name: Build and upload source to Launchpad PPA (signed tags only)
+
+run-name: PPA publish ${{ github.ref_name }}
+
+on:
+  push:
+    tags:
+      - "v[0-9]*.[0-9]*.[0-9]*"
+
+jobs:
+  ppa:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            devscripts debhelper dput gnupg build-essential
+
+      - name: Extract tag/version
+        id: v
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          ver="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag signature using only provided keys
+        env:
+          TAG_SIGNING_PUBKEYS: ${{ secrets.TAG_SIGNING_PUBKEYS }}
+        run: |
+          set -euo pipefail
+          test -n "${TAG_SIGNING_PUBKEYS:-}" || { echo "TAG_SIGNING_PUBKEYS secret is not set" >&2; exit 1; }
+
+          tag="${{ steps.v.outputs.tag }}"
+
+          GNUPGHOME="$(mktemp -d)"
+          chmod 700 "$GNUPGHOME"
+          export GNUPGHOME
+
+          printf '%s\n' "$TAG_SIGNING_PUBKEYS" | gpg --batch --yes --import
+
+          git tag -v "$tag"
+
+      - name: Import PPA signing key
+        env:
+          PPA_GPG_PRIVATE_KEY: ${{ secrets.PPA_GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "${PPA_GPG_PRIVATE_KEY:-}" || { echo "PPA_GPG_PRIVATE_KEY secret is not set" >&2; exit 1; }
+          echo "$PPA_GPG_PRIVATE_KEY" | gpg --batch --yes --import
+
+      - name: Configure gpg loopback
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.gnupg
+          chmod 700 ~/.gnupg
+          echo "allow-preset-passphrase" >> ~/.gnupg/gpg-agent.conf
+          gpgconf --kill gpg-agent || true
+          gpgconf --launch gpg-agent
+
+      - name: Build and upload PPA
+        env:
+          GPG_KEY_ID: ${{ secrets.PPA_GPG_KEY_ID }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          PPA_TARGET: ${{ vars.PPA_TARGET }}
+          PPA_SERIES: ${{ vars.PPA_SERIES }}
+        run: |
+          set -euo pipefail
+          test -n "${GPG_KEY_ID:-}" || { echo "PPA_GPG_KEY_ID secret is not set" >&2; exit 1; }
+          test -n "${PPA_SERIES:-}" || { echo "PPA_SERIES repo variable is not set" >&2; exit 1; }
+          test -n "${PPA_TARGET:-}" || { echo "PPA_TARGET repo variable is not set" >&2; exit 1; }
+
+          if [ -n "${GPG_PASSPHRASE:-}" ]; then
+              keygrip="$(gpg --with-keygrip --with-colons -K "$GPG_KEY_ID" | awk -F: '/^grp/{print $10; exit}')"
+              /usr/lib/gnupg2/gpg-preset-passphrase --preset --passphrase "$GPG_PASSPHRASE" "$keygrip"
+          fi
+
+          chmod +x ./build_package.sh
+          ./build_package.sh ppa "${{ steps.v.outputs.ver }}" \
+            --msg-from-tag "${{ steps.v.outputs.tag }}" \
+            --series "$PPA_SERIES" \
+            --upload \
+            --ppa "$PPA_TARGET" \
+            --gpg-key "$GPG_KEY_ID"
+
+      - name: Upload artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppa-source-artifacts
+          path: |
+            build/*.dsc
+            build/*.changes
+            build/*.tar.*
+            build/*.buildinfo
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 6
+          overwrite: false
+          include-hidden-files: false

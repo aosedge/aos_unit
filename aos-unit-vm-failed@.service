@@ -1,0 +1,22 @@
+[Unit]
+Description=Aos-unit VM failed handler for %i
+BindsTo=aos-unit.service
+After=aos-unit.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/aos-unit/vm-failed-handler "%i"
+User=aos-unit
+Group=aos-unit
+RuntimeDirectory=aos-unit
+StateDirectory=aos-unit
+LogsDirectory=aos-unit
+ConfigurationDirectory=aos-unit
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectControlGroups=true
+ProtectKernelTunables=true
+ProtectKernelModules=true

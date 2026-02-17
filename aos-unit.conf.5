@@ -1,0 +1,280 @@
+.TH AOS-UNIT.CONF 5 "2026-02-22" "AosEdge Unit 1.0" "File Formats"
+.SH NAME
+aos-unit.conf \- Configuration files for AosEdge Unit VM management
+.SH SYNOPSIS
+.I /etc/aos-unit/unit_config.yaml
+.br
+.I /etc/aos-unit/runtime.conf
+
+.SH DESCRIPTION
+.B aos-unit
+uses two configuration files to define VM behavior and infrastructure settings.
+
+.SH UNIT_CONFIG.YAML
+.SS Overview
+The main configuration file defining VM nodes in YAML format. It dictates the hardware, firmware, and network identity of each virtualized edge node.
+
+.SS Format
+.nf
+unit:
+  node_configs:
+    \- name: main
+      cpu: 4
+      mem: 8G
+      ip: 10.0.0.100      # Optional
+      arch: amd64         # Optional
+      image: custom.qcow2 # Optional
+      machine_type: q35   # Optional
+      cpu_type: max       # Optional
+      uefi: true          # Optional
+.fi
+
+.SS Parameters
+.TP
+.B name
+(Required) VM name used for:
+.RS
+.IP \[bu] 2
+Hostname resolution (name.aos-unit)
+.IP \[bu]
+Image auto-discovery
+.IP \[bu]
+systemd transient service naming (aos-node-name.service)
+.IP \[bu]
+MAC address generation (deterministic hash)
+.IP \[bu]
+Log and UNIX socket naming
+.RE
+
+.TP
+.B cpu
+(Required) Number of virtual CPUs. Integer value (e.g., 2, 4, 8).
+
+.TP
+.B mem
+(Required) Memory allocation.
+.br
+Format: <number><unit> where unit is M (megabytes) or G (gigabytes).
+.br
+Examples: 4G, 8192M, 16G
+
+.TP
+.B ip
+(Optional) Static IP address for DHCP reservation.
+.br
+Must be within the same /24 bridge subnet (default: 10.0.0.0/24).
+.br
+If omitted, dnsmasq assigns IP from pool (10.0.0.100-254).
+.br
+Both static and dynamic VMs are accessible via hostname.
+.br
+Example: 10.0.0.200
+
+.TP
+.B arch
+(Optional) Guest architecture.
+.br
+Values: amd64, arm64, x86_64, aarch64
+.br
+Default: host architecture
+.br
+Cross-architecture uses TCG (slower than KVM). Note: 32-bit ARM (armv7) is not yet supported.
+
+.TP
+.B image
+(Optional) Custom image filename.
+.br
+Default: auto-discovers from name and architecture using naming convention.
+.br
+Example: custom-vm.qcow2
+
+.TP
+.B machine_type
+(Optional) QEMU machine type.
+.br
+Common values: q35 (x86_64), virt (aarch64)
+.br
+Default: q35 for amd64, virt for arm64
+
+.TP
+.B cpu_type
+(Optional) QEMU CPU type.
+.br
+Common values: max, host, cortex-a57, qemu64
+.br
+Default: max for amd64, cortex-a57 for arm64. (Note: aarch64 with KVM enabled strictly forces 'host').
+
+.TP
+.B uefi
+(Optional) Boolean to enable/disable UEFI boot firmware.
+.br
+Values: true, false
+.br
+Default: false
+.br
+If omitted from the YAML, but the auto-discovered image filename contains the string "uefi", this parameter will automatically be treated as true. If true, mounts read-only OVMF/AAVMF code and provisions a unique read-write NVRAM variables file per VM.
+
+.SS Parameter Precedence and Defaults
+The orchestration engine resolves node parameters using the following strict hierarchy:
+
+.IP 1. 3
+.B Explicit YAML Configuration:
+Values explicitly defined in \fIunit_config.yaml\fR always take absolute precedence.
+.IP 2.
+.B Filename Heuristics:
+If the \fBuefi\fR value is missing from the YAML, the runner infers it from the auto-discovered image filename. If the filename contains the string "uefi" (e.g., aos-vm-main-amd64-uefi.qcow2), UEFI boot will automatically be enabled.
+.IP 3.
+.B System Defaults:
+If no heuristic applies, the system falls back to safe defaults based on the host system:
+.RS
+.IP \[bu] 2
+\fBarch\fR: Defaults to the host's native architecture.
+.IP \[bu]
+\fBmachine_type\fR: Defaults to \fBq35\fR (x86_64) or \fBvirt\fR (aarch64).
+.IP \[bu]
+\fBcpu_type\fR: Defaults to \fBmax\fR (x86_64) or \fBcortex-a57\fR (aarch64). (Overridden to \fBhost\fR if KVM is enabled on aarch64).
+.IP \[bu]
+\fBip\fR: Defaults to dynamic DHCP allocation from the dnsmasq pool.
+.RE
+
+.SS Image Discovery and Formats
+If the \fBimage\fR parameter is omitted, the runner searches \fI/var/lib/aos-unit/\fR for a matching disk image.
+
+.B Supported Image Format:
+The orchestration engine is strictly limited to \fB.qcow2\fR format disk images. Raw images or other formats are not supported for auto-discovery.
+
+.B Naming Convention Template:
+.nf
+aos-vm-{name}-{arch_suffix}[-uefi]*.qcow2
+.fi
+
+.B Regex Matching Logic:
+The runner applies the following regex pattern to discover the correct image:
+.nf
+^aos-vm-{name}-({arch_suffix}|{legacy_arch}).*\\.qcow2$
+.fi
+.br
+.I Example matches for node "main" (amd64):
+.IP \[bu] 2
+aos-vm-main-amd64.qcow2
+.IP \[bu]
+aos-vm-main-amd64-uefi.qcow2
+.IP \[bu]
+aos-vm-main-qemux86-64.qcow2 (Legacy Yocto naming)
+
+Images must be owned by the \fIaos-unit\fR user to allow QEMU read/write access.
+
+.SH RUNTIME.CONF
+.SS Overview
+Infrastructure, networking, and runtime configuration settings loaded by the runner and network helper scripts.
+
+.SS Format
+.nf
+# Bridge name for VM networking
+BRIDGE_NAME="aos-br0"
+
+# Bridge IP address and netmask (CIDR notation)
+BRIDGE_IP="10.0.0.1/24"
+
+# DNS domain for VMs
+DNS_DOMAIN="aos-unit"
+
+# DNS alternative port for dnsmasq
+DNS_ALT_PORT="5300"
+UPSTREAM_DNS="127.0.0.53"
+
+# DHCP range for VM IP assignment
+DHCP_START="10.0.0.100"
+DHCP_END="10.0.0.254"
+
+# Internet-facing interface
+INTERNET_INTERFACE=""
+
+# Enable KVM
+ENABLE_KVM="true"
+.fi
+
+.SS Parameters
+.TP
+.B BRIDGE_NAME
+Network bridge name. Must be listed in \fI/etc/qemu/bridge.conf\fR to allow QEMU to attach to it.
+
+.TP
+.B BRIDGE_IP
+Bridge IP address and subnet. Acts as the Gateway IP for the VMs. Consider using alternative subnets (e.g., 10.200.1.1/24) if your host environment conflicts with common LANs.
+.IP
+\fBSupported prefix length:\fR /24 only. The VM bridge network is supported only as a single /24 IPv4 subnet. Static node IP validation assumes /24 semantics (first three octets match). Using other prefix lengths may cause valid addresses to be rejected.
+.IP
+Example:
+.BR "BRIDGE_IP=10.10.0.1/24"
+
+.TP
+.B DNS_DOMAIN
+DNS domain suffix for VMs. VMs are accessible as: name.domain.
+
+.TP
+.B DNS_ALT_PORT
+Port for dnsmasq DNS server (sidecar strategy). Uses a non-standard port to avoid conflicts with systemd-resolved on the host. nftables transparently redirects VM DNS queries.
+
+.TP
+.B UPSTREAM_DNS
+Upstream DNS server for internet resolution.
+.IP
+Usually, this configuration assumes
+.BR systemd-resolved (8)
+is enabled and provides the local stub resolver. If
+.BR systemd-resolved (8)
+is not running, set this to a reachable upstream DNS resolver address.
+
+.TP
+.B DHCP_START / DHCP_END
+Range of the DHCP IP pool for dynamic allocations. Must be within the bridge subnet.
+
+.TP
+.B INTERNET_INTERFACE
+Network interface for NAT masquerading to the internet. Empty means auto-detect. Specify manually only if auto-detection fails.
+
+.TP
+.B ENABLE_KVM
+(Optional) Enables QEMU hardware acceleration. If true, the runner verifies host support and access to \fI/dev/kvm\fR. If false, forces software emulation (TCG). (Default: false)
+
+.SH YAML PARSER LIMITATIONS
+To maintain a minimal footprint without external dependencies, \fBaos-unit\fR uses a lightweight, custom AWK-based YAML parser. It supports only a strict subset of YAML formatting:
+
+.IP \[bu] 2
+.B Hierarchy:
+The file must start with the top-level key \fBunit:\fR followed by \fBnode_configs:\fR.
+.IP \[bu]
+.B Indentation:
+Indentation must be consistent (spaces only, 2 or 4 spaces recommended).
+.IP \[bu]
+.B Lists:
+List items must start with a dash and a space (e.g., \fB- name: main\fR).
+.IP \[bu]
+.B Comments:
+Inline comments (\fB#\fR) are supported but must be preceded by whitespace or be at the start of a line.
+.IP \[bu]
+.B Unsupported Features:
+Advanced YAML features such as anchors, aliases, multi-line string blocks (> or |), and complex nested dictionaries are \fBNOT\fR supported.
+
+.SH NOTES
+Host-side DNS routing for the VM domain is configured via
+.BR resolvectl (1)
+and therefore requires
+.BR systemd-resolved (8)
+and D-Bus access (the package installs a Polkit rule for this integration).
+
+.SH SEE ALSO
+.BR aos-unit (8),
+.BR systemctl (1),
+.BR dnsmasq (8),
+.BR nft (8),
+.BR qemu (1)
+
+.SH AUTHOR
+AosEdge Team <support@aosedge.tech>
+
+.SH COPYRIGHT
+Copyright \(co 2018-2026 EPAM Systems Inc.
+.br
+Licensed under the Apache License, Version 2.0.

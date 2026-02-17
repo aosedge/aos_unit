@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+
+: "${LOG_TAG:=aos-unit}"
+
+# Informational message (stdout)
+log() {
+    printf '%s: %s\n' "$LOG_TAG" "$*"
+}
+
+# Error message (stderr)
+error() {
+    printf '%s: ERROR: %s\n' "$LOG_TAG" "$*" >&2
+}
+
+# Multi-line error message (each line prefixed)
+error_multi() {
+    while IFS= read -r line; do
+        printf '%s: ERROR: %s\n' "$LOG_TAG" "$line" >&2
+    done
+}
+
+# Log error and exit.
+# Usage:
+#   die "message"
+#   die 2 "message"
+die() {
+    local code=1
+    if [[ ${1:-} =~ ^[0-9]+$ ]]; then
+        code="$1"
+        shift
+    fi
+    error "$*"
+    exit "$code"
+}

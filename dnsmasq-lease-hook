@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LIBEXEC_DIR="$(dirname "$(realpath "$0")")"
+
+: "${RUNTIME_DIRECTORY:?RUNTIME_DIRECTORY undefined}"
+: "${CONFIGURATION_DIRECTORY:?CONFIGURATION_DIRECTORY undefined}"
+
+action="${1:?action required}"
+mac="${2:-}"
+ip="${3:-}"
+host="${4:-}"
+
+exec "${LIBEXEC_DIR}/network-helper" lease-event "$action" "$mac" "$ip" "$host"

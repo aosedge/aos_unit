@@ -1,0 +1,37 @@
+# AosEdge Unit Configuration
+# This file defines the nodes (VMs) to be created
+#
+# Each node must have:
+#   - name: Node identifier (alphanumeric, dots, underscores, hyphens only)
+#   - cpu: Number of CPU cores (positive integer)
+#   - mem: Memory allocation (integer with optional M or G suffix)
+#
+# Examples:
+#   cpu: 4          # 4 CPU cores
+#   mem: 8G         # 8 GiB of RAM
+#   mem: 8192M      # 8192 MiB of RAM
+#   mem: 8          # 8 GiB of RAM (default unit)
+#
+# IMPORTANT! Total amount of VM resources is limited by aos-unit.slice
+# when adding more units make sure to not cross the CPU / RAM limits!
+
+unit:
+  node_configs:
+    # Main node (always required)
+    - name: main
+      cpu: 4
+      mem: 8G
+      ip: 10.0.0.100
+      uefi: true
+    
+    # Secondary nodes (optional)
+    - name: secondary
+      cpu: 2
+      mem: 4G
+      uefi: true
+    
+    # Add more secondary nodes as needed
+    #- name: secondary-N
+    #  cpu: 2
+    #  mem: 4G
+    #  uefi: true

@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LIBEXEC_DIR="$(dirname "$(realpath "$0")")"
+LOG_TAG="aos-unit:cleanup"
+. "${LIBEXEC_DIR}/log-helper"
+
+: "${RUNTIME_DIRECTORY:?RUNTIME_DIRECTORY is undefined. Check systemd unit.}"
+: "${CONFIGURATION_DIRECTORY:?CONFIGURATION_DIRECTORY is undefined. Check systemd unit.}"
+
+readonly RUNTIME_CONFIG="${CONFIGURATION_DIRECTORY}/runtime.conf"
+source "$RUNTIME_CONFIG"
+
+: "${BRIDGE_NAME:?BRIDGE_NAME missing in $RUNTIME_CONFIG}"
+
+NET_LOCK="${RUNTIME_DIRECTORY}/net.lock"
+
+DNSMASQ_UNIT="aos-unit-dnsmasq"
+DNSMASQ_SERVICE="${DNSMASQ_UNIT}.service"
+
+mkdir -p "$RUNTIME_DIRECTORY"
+exec 9>"$NET_LOCK"
+flock -x 9
+
+log "Stopping dnsmasq transient unit: ${DNSMASQ_SERVICE}"
+systemctl stop "$DNSMASQ_SERVICE" 2>/dev/null || true
+systemctl reset-failed "$DNSMASQ_SERVICE" 2>/dev/null || true
+
+if command -v resolvectl >/dev/null 2>&1; then
+    log "Reverting systemd-resolved settings for ${BRIDGE_NAME}"
+    resolvectl revert "$BRIDGE_NAME" || true
+fi
+
+nft delete table inet aos_unit 2>/dev/null || true
+log "nft table inet aos_unit removed"
+
+log "Removing bridge: $BRIDGE_NAME"
+ip link set "$BRIDGE_NAME" down 2>/dev/null || true
+ip link delete "$BRIDGE_NAME" type bridge 2>/dev/null || ip link delete "$BRIDGE_NAME" 2>/dev/null || true
+
+log "Cleanup complete"

@@ -1,0 +1,403 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LIBEXEC_DIR="$(dirname "$(realpath "$0")")"
+readonly LOG_TAG="aos-unit:network-helper"
+. "${LIBEXEC_DIR}/log-helper"
+
+: "${RUNTIME_DIRECTORY:?RUNTIME_DIRECTORY is undefined. Check systemd unit.}"
+: "${CONFIGURATION_DIRECTORY:?CONFIGURATION_DIRECTORY is undefined. Check systemd unit.}"
+
+readonly RUNTIME_CONFIG="${CONFIGURATION_DIRECTORY}/runtime.conf"
+source "$RUNTIME_CONFIG"
+
+: "${BRIDGE_NAME:?BRIDGE_NAME missing in $RUNTIME_CONFIG}"
+: "${DNS_DOMAIN:?DNS_DOMAIN missing in $RUNTIME_CONFIG}"
+
+readonly EXIT_RUNTIME_ERROR=1
+readonly EXIT_CONFIG_ERROR=2
+
+readonly NET_LOCK="${RUNTIME_DIRECTORY}/net.lock"
+
+readonly TABLE_FAMILY="inet"
+readonly TABLE_NAME="aos_unit"
+readonly POSTROUTING_CHAIN="postrouting"
+readonly FORWARD_CHAIN="forward"
+
+readonly VMS_CONF="$RUNTIME_DIRECTORY/dnsmasq.d/vms.conf"
+readonly HOSTS_FILE="$RUNTIME_DIRECTORY/dnsmasq.d/hosts"
+
+readonly DNSMASQ_UNIT="aos-unit-dnsmasq"
+readonly DNSMASQ_SERVICE="${DNSMASQ_UNIT}.service"
+
+mkdir -p "$RUNTIME_DIRECTORY/dnsmasq.d"
+touch "$HOSTS_FILE"
+touch "$VMS_CONF"
+
+lock() {
+    exec 9>"$NET_LOCK"
+    flock -x 9
+}
+
+table_present() {
+    nft list table "$TABLE_FAMILY" "$TABLE_NAME" >/dev/null 2>&1
+}
+
+detect_internet_interface() {
+    ip route show default 0.0.0.0/0 2>/dev/null | awk 'NR==1 {print $5}'
+}
+
+resolve_internet_interface() {
+    local iface="${INTERNET_INTERFACE:-}"
+
+    if [[ -n $iface ]]; then
+        if [[ -e "/sys/class/net/$iface" ]]; then
+            printf '%s\n' "$iface"
+        else
+            die "${EXIT_CONFIG_ERROR}" "Explicit INTERNET_INTERFACE '$iface' not found in /sys/class/net/"
+        fi
+    else
+        detect_internet_interface
+    fi
+}
+
+dnsmasq_reload() {
+    if systemctl is-active --quiet "$DNSMASQ_SERVICE" 2>/dev/null; then
+        systemctl kill -s HUP "$DNSMASQ_SERVICE" 2>/dev/null || true
+        log "Reloaded dnsmasq (unit $DNSMASQ_SERVICE)"
+    else
+        log "dnsmasq unit not active; reload skipped ($DNSMASQ_SERVICE)"
+    fi
+}
+
+add_nat() {
+    local uplink
+    uplink="$(resolve_internet_interface || true)"
+    if [[ -z ${uplink:-} ]]; then
+        log "No default route yet; skipping NAT setup"
+        exit 0
+    fi
+
+    lock
+
+    if ! table_present; then
+        die "${EXIT_RUNTIME_ERROR}" "nft table ${TABLE_FAMILY} ${TABLE_NAME} not present (service-startup not run?)"
+    fi
+
+    log "Configuring NAT: bridge=$BRIDGE_NAME uplink=$uplink"
+
+    if ! nft -f - <<EOF; then
+flush chain $TABLE_FAMILY $TABLE_NAME $POSTROUTING_CHAIN
+flush chain $TABLE_FAMILY $TABLE_NAME $FORWARD_CHAIN
+add rule $TABLE_FAMILY $TABLE_NAME $FORWARD_CHAIN ct state established,related accept
+add rule $TABLE_FAMILY $TABLE_NAME $FORWARD_CHAIN iifname "$BRIDGE_NAME" oifname "$uplink" accept
+add rule $TABLE_FAMILY $TABLE_NAME $POSTROUTING_CHAIN oifname "$uplink" masquerade
+EOF
+        die "${EXIT_RUNTIME_ERROR}" "Failed to apply nft NAT rules"
+    fi
+
+    # Spawn Monitor only if not already running and no static interface forced
+    if [[ -z ${INTERNET_INTERFACE:-} ]]; then
+        if systemctl is-active --quiet "aos-unit-route-monitor.service"; then
+            return 0
+        fi
+
+        log "Starting dynamic route-monitor..."
+        systemd-run \
+            --unit="aos-unit-route-monitor" \
+            --property="Description=AosEdge Route Monitor (Uplink: ${uplink:-None})" \
+            --property="BindsTo=aos-unit.service" \
+            --property="Restart=always" \
+            --property="RestartSec=2s" \
+            --property="CapabilityBoundingSet=CAP_NET_ADMIN" \
+            --property="AmbientCapabilities=CAP_NET_ADMIN" \
+            --property="RuntimeDirectory=aos-unit" \
+            --property="ConfigurationDirectory=aos-unit" \
+            --property="LogsDirectory=aos-unit" \
+            --property="StateDirectory=aos-unit" \
+            --quiet -- \
+            /usr/bin/bash -c "ip monitor route | grep --line-buffered 'default' | while read -r _; do sleep 2; ${LIBEXEC_DIR}/network-helper add-nat; done"
+    fi
+}
+
+del_nat() {
+    # Kill the monitor immediately so it doesn't try to re-add rules while we are cleaning them up.
+    if systemctl is-active --quiet "aos-unit-route-monitor.service"; then
+        log "Stopping route monitor..."
+        systemctl stop "aos-unit-route-monitor.service" 2>/dev/null || true
+    fi
+
+    lock
+
+    if ! table_present; then
+        log "nft table not present; nothing to remove"
+        exit 0
+    fi
+
+    log "Removing NAT rules"
+
+    nft -f - <<EOF
+flush chain $TABLE_FAMILY $TABLE_NAME $POSTROUTING_CHAIN
+flush chain $TABLE_FAMILY $TABLE_NAME $FORWARD_CHAIN
+add rule $TABLE_FAMILY $TABLE_NAME $FORWARD_CHAIN ct state established,related accept
+EOF
+}
+
+update_hosts_add() {
+    local ip_addr="$1"
+    local host="$2"
+    local fqdn="${host}.${DNS_DOMAIN}"
+    local tmp="${HOSTS_FILE}.tmp"
+
+    awk -v ip="$ip_addr" -v h="$host" -v f="$fqdn" '
+    {
+        for (i = 2; i <= NF; i++) {
+            if ($i == f || $i == h) next
+        }
+        print $0
+    }
+    END {
+        print ip " " f " " h
+    }
+    ' "$HOSTS_FILE" >"$tmp" && mv "$tmp" "$HOSTS_FILE"
+
+    dnsmasq_reload
+}
+
+update_hosts_del() {
+    local host="$1"
+    local fqdn="${host}.${DNS_DOMAIN}"
+    local tmp="${HOSTS_FILE}.tmp"
+
+    awk -v h="$host" -v f="$fqdn" '
+    {
+        for (i = 2; i <= NF; i++) {
+            if ($i == f || $i == h) next
+        }
+        print $0
+    }
+    ' "$HOSTS_FILE" >"$tmp" && mv "$tmp" "$HOSTS_FILE"
+
+    dnsmasq_reload
+}
+
+validate_host_name() {
+    local host="${1:-}"
+
+    if [[ -z $host || ${#host} -gt 63 ]]; then
+        die "${EXIT_CONFIG_ERROR}" "Invalid hostname: '$host'"
+    fi
+
+    if ! [[ $host =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]]; then
+        die "${EXIT_CONFIG_ERROR}" "Invalid hostname: '$host' (must be DNS label, no dots)"
+    fi
+}
+
+validate_mac_addr() {
+    local mac="${1:-}"
+
+    local mac_lc
+    mac_lc=$(printf '%s' "$mac" | tr 'A-F' 'a-f')
+
+    if ! [[ $mac_lc =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]]; then
+        die "${EXIT_CONFIG_ERROR}" "Invalid MAC address: '$mac' (expected format aa:bb:cc:dd:ee:ff)"
+    fi
+
+    printf '%s' "$mac_lc"
+}
+
+validate_ipv4_addr() {
+    local ip="${1:-}"
+
+    if ! awk -v ip="$ip" 'BEGIN {
+        n = split(ip, octets, ".");
+        if (n != 4) exit 1;
+
+        for (i = 1; i <= 4; i++) {
+            o = octets[i];
+            if (o !~ /^[0-9]+$/) exit 1;
+            if (length(o) > 3) exit 1;
+            if (o ~ /^0[0-9]/) exit 1;
+            if (o + 0 < 0 || o + 0 > 255) exit 1;
+        }
+        exit 0;
+    }'; then
+        die "${EXIT_CONFIG_ERROR}" "Invalid IP address: '$ip'"
+    fi
+}
+
+add_vm() {
+    local mac="${1:?mac required}"
+    local host="${2:?hostname required}"
+    local ip="${3:-}"
+
+    validate_host_name "$host"
+
+    if [[ -n $ip ]]; then
+        validate_ipv4_addr "$ip"
+    fi
+
+    lock
+
+    local mac_lc
+    mac_lc=$(validate_mac_addr "$mac")
+
+    local tmp="$VMS_CONF.tmp"
+
+    log "Register VM: mac=$mac_lc host=$host${ip:+ ip=$ip}"
+
+    awk -v m="$mac_lc" -v h="$host" -v ip="$ip" '
+    BEGIN { IGNORECASE=1; wrote=0 }
+    function newline() {
+        if (ip!="") return "dhcp-host=" m "," ip "," h
+        else        return "dhcp-host=" m "," h
+    }
+    $0 ~ /^dhcp-host=/ {
+        line=$0
+        sub(/^dhcp-host=/,"",line)
+        split(line, a, ",")
+        mac=a[1]; hn=a[3]
+        if (hn=="") hn=a[2]
+        gsub(/[ \t\r\n]+/,"",mac); gsub(/[ \t\r\n]+/,"",hn)
+
+        if (tolower(mac)==m || hn==h) {
+            print newline()
+            wrote=1
+            next
+        }
+    }
+    { print $0 }
+    END { if (!wrote) print newline() }
+    ' "$VMS_CONF" >"$tmp" && mv "$tmp" "$VMS_CONF"
+
+    if [[ -n $ip ]]; then
+        update_hosts_add "$ip" "${host}"
+    fi
+}
+
+del_vm() {
+    local mac="${1:?mac required}"
+    local host="${2:?hostname required}"
+    local ip="${3:-}"
+
+    validate_host_name "$host"
+
+    local mac_lc
+    mac_lc=$(validate_mac_addr "$mac")
+
+    if [[ -n $ip ]]; then
+        validate_ipv4_addr "$ip"
+    fi
+
+    lock
+
+    if [[ ! -f $VMS_CONF ]]; then
+        log "VM registry missing; nothing to remove"
+        exit 0
+    fi
+
+    log "Unregister VM: mac=$mac_lc host=$host${ip:+ ip=$ip}"
+
+    local tmp="$VMS_CONF.tmp"
+    awk -v m="$mac_lc" '
+    BEGIN { IGNORECASE=1 }
+    $0 ~ /^dhcp-host=/ {
+        line=$0
+        sub(/^dhcp-host=/,"",line)
+        split(line, a, ",")
+        mac=a[1]
+        gsub(/[ \t\r\n]+/,"",mac)
+        if (tolower(mac)==m) next
+    }
+    { print $0 }
+    ' "$VMS_CONF" >"$tmp" && mv "$tmp" "$VMS_CONF"
+
+    update_hosts_del "${host}"
+}
+
+lookup_vm_record() {
+    local want_mac="$1"
+
+    awk -v m="$want_mac" '
+    BEGIN { IGNORECASE=1 }
+    $0 ~ /^[[:space:]]*dhcp-host=/ {
+        line=$0
+        sub(/^[[:space:]]*dhcp-host=/,"",line)
+        split(line, a, ",")
+        mac=a[1]
+        gsub(/[ \t\r\n]+/,"",mac)
+        if (tolower(mac) != m) next
+
+        ip=a[2]
+        host=a[3]
+        if (host == "") { host=ip; ip="" }
+
+        gsub(/[ \t\r\n]+/,"",ip)
+        gsub(/[ \t\r\n]+/,"",host)
+
+        print ip "|" host
+        exit 0
+    }
+    ' "$VMS_CONF" 2>/dev/null || true
+}
+
+lease_event() {
+    local action="$1"
+    local mac="$2"
+    local ip="$3"
+    local host_hint="$4" # Note: dnsmasq might send its own hostname idea here
+
+    local mac_lc
+    mac_lc=$(validate_mac_addr "$mac")
+
+    lock
+
+    local record
+    record="$(lookup_vm_record "$mac_lc")"
+    if [[ -z $record ]]; then
+        log "Lease event ignored (MAC not whitelisted): mac=${mac_lc} action=${action}"
+        exit 0
+    fi
+
+    local conf_ip="${record%%|*}"
+    local conf_host="${record#*|}"
+
+    validate_host_name "$conf_host"
+
+    case "$action" in
+        add | old)
+            if [[ -n $conf_ip ]]; then
+                log "Lease ${action}: using static mapping from vms.conf: ${conf_host} -> ${conf_ip}"
+                update_hosts_add "$conf_ip" "$conf_host"
+            else
+                if [[ -z $ip || $ip == "*" ]]; then
+                    log "Lease ${action}: missing IP from dnsmasq for ${conf_host}; skipping"
+                    exit 0
+                fi
+                validate_ipv4_addr "$ip"
+                log "Lease ${action}: learned mapping: ${conf_host} -> ${ip}"
+                update_hosts_add "$ip" "$conf_host"
+            fi
+            ;;
+
+        del)
+            log "Lease del: removing mapping for ${conf_host}"
+            update_hosts_del "$conf_host"
+            ;;
+
+        *)
+            log "Unknown lease action '${action}' for mac=${mac_lc}; ignored"
+            ;;
+    esac
+}
+
+cmd="${1:-}"
+shift || true
+case "$cmd" in
+    add-nat) add_nat ;;
+    del-nat) del_nat ;;
+    add-vm) add_vm "$@" ;;
+    del-vm) del_vm "$@" ;;
+    lease-event) lease_event "$@" ;;
+    *) die "${EXIT_CONFIG_ERROR}" "Unknown command: $cmd" ;;
+esac

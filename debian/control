@@ -1,0 +1,40 @@
+Source: aos-unit
+Section: admin
+Priority: optional
+Maintainer: AosEdge Team <support@aosedge.tech>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.0
+Homepage: https://github.com/aosedge/aos_vm_tools
+
+Package: aos-unit
+Architecture: amd64 arm64
+Depends: ${misc:Depends},
+         adduser,
+         procps,
+         systemd,
+         iproute2,
+         nftables,
+         dnsmasq-base,
+         qemu-system-x86,
+         qemu-system-arm,
+         ovmf [amd64], qemu-efi-aarch64 [arm64],
+         gawk,
+         polkitd | policykit-1,
+         logrotate,
+         socat
+Description: AosEdge Unit - VM management for edge computing
+ AosEdge Unit provides automated VM management for edge computing
+ deployments. It manages QEMU/KVM virtual machines with network
+ bridging, DHCP, and port forwarding.
+ .
+ This package supports both x86_64 and aarch64 guest architectures
+ via TCG emulation, allowing cross-architecture VM deployment
+ regardless of host hardware.
+ .
+ Features:
+  * Automated network bridge setup
+  * DHCP server configuration for VMs
+  * Port forwarding for SSH access
+  * Support for x86_64 and aarch64 guest architectures (TCG mode)
+  * Systemd integration for service management
+  * Zero external dependencies (pure bash/AWK implementation)

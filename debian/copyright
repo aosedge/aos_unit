@@ -1,0 +1,11 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: AosEdge Unit
+Source: https://github.com/aosedge/aos_vm_tools
+
+Files: *
+Copyright: 2018-2026 EPAM Systems Inc.
+License: Apache-2.0
+
+License: Apache-2.0
+ On Debian systems, the complete text of the Apache version 2.0 license
+ can be found in "/usr/share/common-licenses/Apache-2.0".

@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LIBEXEC_DIR="$(dirname "$(realpath "$0")")"
+readonly LOG_TAG="aos-unit:vm-failed"
+. "${LIBEXEC_DIR}/log-helper"
+
+: "${LOGS_DIRECTORY:?Environment variable LOGS_DIRECTORY is undefined}"
+
+unit="${1:?unit required}"
+
+log "VM unit FAILED: ${unit}"
+log "Writing failure marker to: ${LOGS_DIRECTORY}/vm-failures.log"
+
+log "systemctl status:"
+systemctl --no-pager -l status "${unit}" 2>&1 | error_multi || true
+
+log "Last 200 journal lines:"
+journalctl --no-pager -u "${unit}" -n 200 2>&1 | error_multi || true
+
+ts="$(date -Is 2>/dev/null || date)"
+echo "${ts} ${unit} failed" >>"${LOGS_DIRECTORY}/vm-failures.log"

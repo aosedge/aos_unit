@@ -1,0 +1,104 @@
+#!/bin/bash
+# debian/postinst - AOS Edge Unit post-installation script
+set -e
+
+readonly BRIDGE_CONF=/etc/qemu/bridge.conf
+
+case "$1" in
+    configure)
+        # Create system user if it doesn't exist
+        if ! getent passwd aos-unit >/dev/null 2>&1; then
+            adduser --system --group --home /var/lib/aos-unit --shell /bin/bash \
+                --gecos "AosEdge Unit Service" aos-unit
+        fi
+
+        # Add user to kvm group for /dev/kvm access
+        if getent group kvm >/dev/null 2>&1; then
+            adduser aos-unit kvm >/dev/null 2>&1 || true
+        fi
+
+        # Create directory structure with proper ownership
+        install -d -m 0755 -o aos-unit -g aos-unit /var/log/aos-unit
+        install -d -m 0755 -o aos-unit -g aos-unit /var/lib/aos-unit
+
+        # Apply sysctl settings
+        if command -v sysctl >/dev/null 2>&1; then
+            sysctl -p /etc/sysctl.d/99-aos-unit.conf >/dev/null 2>&1 || true
+        fi
+
+        # Configure QEMU bridge permissions
+        # bridge.conf may already exist with other bridges - modify it safely
+        if [ ! -f "$BRIDGE_CONF" ]; then
+            install -D /dev/null "$BRIDGE_CONF"
+        fi
+        # Add our bridge if not already present
+        if ! grep -q "^allow aos-br0" "$BRIDGE_CONF" 2>/dev/null; then
+            # If file is not empty AND lacks a trailing newline, add a newline first
+            if [ -s "$BRIDGE_CONF" ] && [ "$(tail -c 1 "$BRIDGE_CONF" | wc -l)" -eq 0 ]; then
+                echo "" >>"$BRIDGE_CONF"
+            fi
+            echo "allow aos-br0" >>"$BRIDGE_CONF"
+        fi
+
+        # Print installation success message
+        cat <<'EOF'
+
+==========================================
+AosEdge Unit installation complete!
+==========================================
+
+Configuration files:
+  /etc/aos-unit/runtime.conf         - Infrastructure settings
+  /etc/aos-unit/unit_config.yaml     - Node definitions
+  /etc/sysctl.d/99-aos-unit.conf     - IP forwarding
+  /etc/polkit-1/rules.d/10-aos-unit.rules - PolicyKit permissions
+Systemd units:
+  /lib/systemd/system/aos-unit.service - Main service
+  /lib/systemd/system/aos-unit.slice   - Resource management
+
+System user created:
+  aos-unit (member of kvm group)
+
+Data directories:
+  /var/lib/aos-unit  - VM images
+  /var/log/aos-unit  - VM logs
+
+User command:
+  aos-unit  - Entry point (symlink to runner)
+
+Next steps:
+  1. Review /etc/aos-unit/runtime.conf (if needed)
+  2. Edit /etc/aos-unit/unit_config.yaml to define your nodes
+  3. Place VM images in /var/lib/aos-unit/
+     Format: aos-vm-<node>-<machine>.qcow2
+     Example: aos-vm-main-qemuarm64.qcow2
+  4. Enable and start the service:
+     sudo systemctl enable aos-unit
+     sudo systemctl start aos-unit
+     sudo systemctl status aos-unit
+
+For troubleshooting:
+  sudo journalctl -u aos-unit -f            # Main service
+  sudo journalctl -u 'aos-node-*' -f        # All VMs
+  sudo systemctl status aos-node-main       # Specific VM
+  sudo systemd-cgtop                        # Resource usage
+
+Documentation:
+  man aos-unit
+  man aos-unit.conf
+
+EOF
+        ;;
+
+    abort-upgrade | abort-remove | abort-deconfigure)
+        # Nothing to do
+        ;;
+
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+exit 0

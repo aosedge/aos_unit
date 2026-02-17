@@ -1,0 +1,73 @@
+#!/bin/bash
+# debian/postrm - AOS Edge Unit post-removal script
+set -e
+
+case "$1" in
+    purge)
+        # Remove configuration files
+        rm -f /etc/aos-unit/runtime.conf
+        rm -f /etc/aos-unit/unit_config.yaml
+        rmdir /etc/aos-unit 2>/dev/null || true
+
+        # Remove sysctl configuration
+        rm -f /etc/sysctl.d/99-aos-unit.conf
+
+        # Keep the file even if empty - user may have comments or other content
+        if [ -f /etc/qemu/bridge.conf ]; then
+            sed -i '/^allow aos-br0/d' /etc/qemu/bridge.conf
+        fi
+
+        # Remove PolicyKit rule
+        rm -f /etc/polkit-1/rules.d/10-aos-unit.rules
+
+        # Remove logrotate configuration
+        rm -f /etc/logrotate.d/aos-unit
+
+        # Remove system user
+        if getent passwd aos-unit >/dev/null 2>&1; then
+            deluser --system aos-unit >/dev/null 2>&1 || true
+        fi
+
+        # Inform about data directories
+        cat <<'EOF'
+
+AosEdge Unit has been purged.
+
+The following directories contain data and logs:
+  /var/lib/aos-unit  - VM images
+  /var/log/aos-unit  - VM logs
+
+These directories have NOT been removed automatically
+to prevent accidental data loss.
+
+To remove them manually:
+  sudo rm -rf /var/lib/aos-unit
+  sudo rm -rf /var/log/aos-unit
+
+EOF
+        ;;
+
+    remove)
+        # On remove (not purge), keep config files
+        cat <<'EOF'
+
+AosEdge Unit removed (configuration preserved).
+
+To completely remove including configuration:
+  sudo apt-get purge aos-unit
+
+EOF
+        ;;
+
+    upgrade | failed-upgrade | abort-install | abort-upgrade | disappear)
+        # Nothing to do
+        ;;
+
+    *)
+        echo "postrm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+exit 0

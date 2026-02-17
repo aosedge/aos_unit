@@ -1,0 +1,23 @@
+#!/bin/bash
+# debian/prerm - AOS Edge Unit pre-removal script
+set -e
+
+case "$1" in
+    remove | upgrade | deconfigure)
+        # DEBHELPER token allows dh_installsystemd to inject proper stop logic
+        # This is preferred over manually calling systemctl
+        :
+        ;;
+    failed-upgrade)
+        # Nothing to do
+        ;;
+
+    *)
+        echo "prerm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

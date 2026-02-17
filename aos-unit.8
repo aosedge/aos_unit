@@ -1,0 +1,101 @@
+.TH AOS-UNIT 8 "2026-02-22" "AosEdge Unit 1.0" "System Administration"
+.SH NAME
+aos-unit \- Multi-VM orchestration system for AosEdge edge deployments
+.SH SYNOPSIS
+.B systemctl
+.RB { start | stop | restart | status }
+.B aos-unit
+
+.SH DESCRIPTION
+.B aos-unit
+is a systemd-integrated service that orchestrates multiple QEMU/KVM virtual machines with deterministic networking, stateful logging, and automatic resource management. It is designed to run securely as an unprivileged user, launching isolated transient virtual machines for AosEdge multi-node deployments.
+
+.SH OPERATION
+.SS Startup Sequence
+When the \fBaos-unit\fR service is started, the system first initializes the required network environment. This includes preparing the virtual bridge defined by \fBBRIDGE_NAME\fR and starting a dedicated \fBdnsmasq\fR systemd service to handle isolated DHCP and DNS resolution. Host \fBnftables\fR rules are also configured for routing and NAT masquerading.
+.br
+Following network initialization, the main orchestrator parses the YAML configuration. For each defined node, it provisions the required runtime files and uses \fBsystemd-run\fR to spawn the virtual machine as an independent, transient systemd service (e.g., \fIaos-node-<name>.service\fR). Network helper utilities are invoked dynamically during this VM creation phase to register MAC addresses and IP allocations with the running DNS/DHCP server.
+
+.SS Shutdown Sequence
+When the \fBaos-unit\fR service is stopped, it cascades a clean shutdown to all running transient VM services, sending standard ACPI termination signals to the guest operating systems. Once all VMs have safely halted, the orchestrator automatically tears down the network bridge, flushes the isolated \fBnftables\fR rules, and stops the associated \fBdnsmasq\fR service to leave the host system entirely clean.
+
+.SH USER AND SECURITY
+The entire orchestration suite is designed to run rootless. All processes, including the main orchestrator, the network helpers, and the QEMU virtual machines, execute strictly under the \fBaos-unit\fR user and \fBaos-unit\fR group. Elevated network operations (like bridge creation) are permitted strictly within the systemd unit via specific Linux capabilities (e.g., \fBCAP_NET_ADMIN\fR), ensuring maximum host security without requiring full privileges.
+
+.SH CONSOLE AND LOGGING
+.SS Live Console Access (socat)
+The virtual serial port (UART) of each VM is multiplexed to a live UNIX socket. These sockets are located in the system-managed runtime directory (usually \fB/run/aos-unit/\fR). You can connect interactively to a running VM without interrupting background logging:
+.nf
+.B sudo socat -,raw,echo=0,escape=0x1d UNIX-CONNECT:/run/aos-unit/<name>.serial
+.fi
+.I Note: Use \fBCtrl-]\fR (Escape 0x1d) to cleanly detach from the socat session.
+
+.SS Persistent Serial Logs
+Serial console output is mirrored to persistent files in the system logs directory (usually \fB/var/log/aos-unit/\fR). To prevent disk exhaustion, these serial logs are automatically rotated on an hourly schedule. The rotation enforces a strict 50MB size limit and utilizes the \fBcopytruncate\fR directive. This allows the log data to be safely compressed into archives without interrupting QEMU's continuous hold on the live socket file.
+
+.SS On-Demand Debug Log Rotation
+QEMU natively overwrites emulator debug logs (\fB-D\fR) upon VM start. To prevent the loss of forensic data following a crash, the orchestrator executes an isolated, on-demand \fBlogrotate\fR process for the specific VM immediately before launching it, automatically archiving the previous session's debug output.
+
+.SH NETWORK MANAGEMENT
+The networking architecture of \fBaos-unit\fR is strictly designed to achieve three primary goals without polluting the host's global network state:
+.IP 1. 3
+Seamless outbound internet access for all VMs via NAT masquerading.
+.IP 2.
+Predictable, domain-name-based access from the host to the VMs (e.g., \fIssh root@main.aos-unit\fR).
+.IP 3.
+Clean, conflict-free integration with the host's native \fBsystemd-resolved\fR service without requiring manual host system adjustments.
+
+.SS DNS Sidecar and Resolution
+To achieve isolated domain resolution without altering the host's \fI/etc/resolv.conf\fR or \fBsystemd-resolved\fR configuration, \fBaos-unit\fR employs a sidecar strategy. A dedicated \fBdnsmasq\fR service instance binds to an alternative port (\fBDNS_ALT_PORT\fR). Local \fBnftables\fR rules transparently intercept VM DNS requests on port 53 and redirect them to this sidecar, which handles local domain resolution and forwards external queries to the host's native resolver.
+
+.SS DHCP and NAT Masquerading
+The sidecar \fBdnsmasq\fR service strictly manages IP allocation within the configured bridge subnet bounded by \fBDHCP_START\fR and \fBDHCP_END\fR. To provide internet access to the isolated edge nodes, \fBaos-unit\fR configures \fBnftables\fR to dynamically masquerade outbound traffic originating from the virtual bridge, routing it through the host's primary internet-facing interface.
+
+.SH SYSTEM INTEGRATION
+.B aos-unit
+strictly follows the Linux Filesystem Hierarchy Standard (FHS) via systemd's directory management directives.
+.IP \(bu 3
+\fBConfiguration:\fR Stored in \fB/etc/aos-unit/\fR.
+.IP \(bu
+\fBState/Images:\fR Persistent VM data and images reside in \fB/var/lib/aos-unit/\fR.
+.IP \(bu
+\fBRuntime:\fR Volatile files (sockets, PIDs, locks) reside in \fB/run/aos-unit/\fR and are cleared upon service stop.
+.IP \(bu
+\fBLogs:\fR VM console and debug output are stored in \fB/var/log/aos-unit/\fR.
+
+.SS Unprivileged Execution (Polkit)
+To allow the unprivileged \fBaos-unit\fR user to launch transient systemd services and dynamically interact with the network bridge, the package installs targeted PolicyKit (polkit) rules (\fI/etc/polkit-1/rules.d/10-aos-unit.rules\fR).
+
+.SS IP Forwarding
+To allow NAT and bridge routing to function properly, IPv4 forwarding must be active on the host. The package automatically enables this in a persistent, Linux-native way by deploying a dedicated sysctl drop-in file (\fI/etc/sysctl.d/99-aos-unit.conf\fR).
+
+.SS QEMU Bridge Helper Exception
+By design, \fBaos-unit\fR avoids modifying global host files. There is one strict exception required by the hypervisor: QEMU's unprivileged network bridge helper hardcodes its security allowlist to \fI/etc/qemu/bridge.conf\fR. To allow the VMs to attach to the custom virtual network, the package installation scripts automatically append the configured \fBBRIDGE_NAME\fR to this file during installation, and safely remove it upon package uninstallation.
+
+.SS Exit Code Behavior
+The parent orchestrator explicitly controls systemd's restart logic using \fBRestartPreventExitStatus=2\fR.
+.TP
+.B Exit 1 (Runtime Error)
+Transient failures (e.g., QEMU crash, host bridge failure). systemd will automatically attempt to restart the orchestrator.
+.TP
+.B Exit 2 (Configuration Error)
+Permanent failures (e.g., missing YAML, malformed configs). systemd will deliberately \fBNOT\fR restart the service to prevent infinite loops. Manual intervention is required.
+
+.SS VM Health Monitoring
+Individual VMs (\fIaos-node-*.service\fR) manage their own restart policies. If a guest OS crashes, systemd will automatically restart that specific transient unit immediately, honoring the burst limits defined in the orchestrator.
+
+.SH SEE ALSO
+.BR aos-unit.conf (5),
+.BR systemctl (1),
+.BR socat (1),
+.BR journalctl (1),
+.BR qemu-system-x86_64 (1),
+.BR qemu-system-aarch64 (1)
+
+.SH AUTHOR
+AosEdge Team <support@aosedge.tech>
+
+.SH COPYRIGHT
+Copyright \(co 2018-2026 EPAM Systems Inc.
+.br
+Licensed under the Apache License, Version 2.0.

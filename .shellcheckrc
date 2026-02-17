@@ -1,0 +1,21 @@
+# AosEdge Unit - ShellCheck configuration
+
+# We intentionally source files via absolute paths (installed under /usr/libexec)
+disable=SC1091
+
+# LOG_TAG is intentionally consumed by sourced log-helper
+disable=SC2034
+
+# We intentionally use dynamic sourcing of runtime.conf
+# (ShellCheck cannot statically resolve them)
+disable=SC1090
+
+# Optional: allow single bracket tests (you use them consistently)
+# disable=SC2166
+
+# Optional: allow set -euo pipefail strict mode usage without warnings
+# (usually not needed, included for clarity)
+# disable=SC3040
+
+# Follow sourced files when possible (improves checking locally)
+external-sources=true

@@ -1,0 +1,22 @@
+// PolicyKit rule for AosEdge Unit
+// - Allows aos-unit to manage systemd transient units (systemd-run)
+// - Allows aos-unit to configure systemd-resolved link DNS/domain (resolvectl)
+
+polkit.addRule(function(action, subject) {
+    if (subject.user !== "aos-unit") {
+        return polkit.Result.NOT_HANDLED;
+    }
+
+    if (action.id == "org.freedesktop.systemd1.manage-units") {
+        return polkit.Result.YES;
+    }
+
+    // Needed for: resolvectl dns <ifname> ... ; resolvectl domain <ifname> ...
+    // Action IDs vary slightly by distro/systemd version, so allow all resolve1.*.
+    if (action.id.indexOf("org.freedesktop.resolve1.") === 0) {
+        return polkit.Result.YES;
+    }
+
+    return polkit.Result.NOT_HANDLED;
+});
+

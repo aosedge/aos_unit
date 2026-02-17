@@ -1,0 +1,34 @@
+# Debian package installation file mapping
+# Format: source_path destination_path
+
+# Internal executables (not for direct user execution)
+# Source files → Destination paths
+runner usr/libexec/aos-unit/
+network-helper usr/libexec/aos-unit/
+log-helper usr/libexec/aos-unit/
+config-parser usr/libexec/aos-unit/
+service-startup usr/libexec/aos-unit/
+service-cleanup usr/libexec/aos-unit/
+vm-failed-handler usr/libexec/aos-unit/
+dnsmasq-lease-hook usr/libexec/aos-unit/
+
+# Systemd units
+aos-unit.service lib/systemd/system/
+aos-unit.slice lib/systemd/system/
+aos-unit-vm-failed@.service lib/systemd/system/
+
+# Configuration files (conffiles - preserved on upgrade)
+runtime.conf etc/aos-unit/
+unit_config.yaml etc/aos-unit/
+
+# System configuration
+99-aos-unit.conf etc/sysctl.d/
+
+# PolicyKit rule (allows aos-unit user to manage systemd units)
+10-aos-unit.rules etc/polkit-1/rules.d/
+
+# Logrotate configuration
+aos-unit etc/logrotate.d
+
+# Documentation
+README.md usr/share/doc/aos-unit/

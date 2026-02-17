@@ -1,0 +1,9 @@
+# Ignore build artifacts in diffs (Regex)
+extend-diff-ignore = "^[^/]+\.egg-info/"
+extend-diff-ignore = "^build/"
+extend-diff-ignore = "^\.git/"
+extend-diff-ignore = "^\.github/"
+
+# Exclude from source tarball (Glob)
+tar-ignore = .github
+tar-ignore = .git

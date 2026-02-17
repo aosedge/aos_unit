@@ -1,0 +1,269 @@
+#!/usr/bin/awk -f
+# parse_unit_config.awk - Parse AOS unit configuration YAML (simple subset)
+#
+# Usage: awk -f parse_unit_config.awk unit_config.yaml
+#
+# Output format:
+#   SECONDARY_COUNT=N
+#   NODE_ARGS="name1|image|ip|arch|machine_type|cpu_type|cpu|mem name2|..."
+#
+# Notes / supported YAML subset:
+# - unit: ... unit.node_configs: is a list of maps
+# - Indentation may be 2 or 4 spaces (not strictly enforced), but must be consistent
+# - List items can be:
+#     - name: vm1
+#       cpu: 2
+#   or:
+#     - cpu: 2
+#       name: vm1
+# - Values may be unquoted or quoted with '...' or "..."
+# - Inline comments (# ...) are stripped only when the # is not inside quotes
+
+BEGIN {
+    in_unit = 0
+    in_node_configs = 0
+    unit_indent = -1
+    node_configs_indent = -1
+
+    node_count = 0
+    node_args = ""
+
+    reset_node()
+}
+
+function reset_node() {
+    current_name = ""
+    current_cpu = ""
+    current_mem = ""
+    current_image = ""
+    current_ip = ""
+    current_arch = ""
+    current_machine_type = ""
+    current_cpu_type = ""
+    current_uefi = ""
+}
+
+function ltrim(s) { sub(/^[[:space:]]+/, "", s); return s }
+function rtrim(s) { sub(/[[:space:]]+$/, "", s); return s }
+function trim(s)  { return rtrim(ltrim(s)) }
+
+# Remove inline comments while respecting single/double quotes.
+# Strips from first # that is NOT inside quotes.
+function strip_comments(s,    i, c, out, in_s, in_d) {
+    out = ""
+    in_s = 0
+    in_d = 0
+    for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == "'" && !in_d) { in_s = !in_s; out = out c; continue }
+        if (c == "\"" && !in_s) { in_d = !in_d; out = out c; continue }
+        if (c == "#" && !in_s && !in_d) {
+            # Only treat as comment if preceded by whitespace or start-of-line
+            if (i == 1 || substr(s, i-1, 1) ~ /[[:space:]]/) break
+        }
+        out = out c
+    }
+    return out
+}
+
+function unquote(s) {
+    s = trim(s)
+    if (s ~ /^".*"$/) { sub(/^"/, "", s); sub(/"$/, "", s); return s }
+    if (s ~ /^'\''.*'\''$/) { sub(/^'\''/, "", s); sub(/'\''$/, "", s); return s }
+    return s
+}
+
+function indent_len(line,    m) {
+    match(line, /^[[:space:]]*/)
+    return RLENGTH
+}
+
+# Validate IPv4 address
+function is_valid_ipv4(ip,    octets, i) {
+    if (ip !~ /^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$/) return 0
+    split(ip, octets, ".")
+    for (i = 1; i <= 4; i++) if (octets[i] < 0 || octets[i] > 255) return 0
+    return 1
+}
+
+# Validate image filename (no paths!)
+function is_valid_image_filename(filename) {
+    if (filename == "") return 0
+    if (filename ~ /\//) return 0
+    if (filename ~ /[[:space:]]/) return 0
+    if (filename ~ /\|/) return 0
+    if (filename !~ /\.(qcow2|raw|img)$/) return 0
+    return 1
+}
+
+function is_valid_arch(arch) {
+    return (arch == "amd64" || arch == "arm64")
+}
+
+# DNS-safe single-label hostname (also safe for systemd unit suffix usage)
+function is_valid_node_name(name) {
+    if (length(name) < 1 || length(name) > 63) return 0
+    return (name ~ /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$/)
+}
+
+function flush_node() {
+    # Empty node?
+    if (current_name == "" && current_cpu == "" && current_mem == "" &&
+        current_image == "" && current_ip == "" && current_arch == "" &&
+        current_machine_type == "" && current_cpu_type == "" && current_uefi == "") {
+        return
+    }
+
+    if (current_name == "") {
+        print "ERROR: Node missing 'name' field (has cpu=" current_cpu " mem=" current_mem ")" > "/dev/stderr"
+        exit 1
+    }
+    if (!is_valid_node_name(current_name)) {
+        print "ERROR: Invalid node name (DNS-safe label required): " current_name > "/dev/stderr"
+        print "       Allowed: [A-Za-z0-9-], must start/end with alnum, max 63 chars" > "/dev/stderr"
+        exit 1
+    }
+
+    if (current_cpu == "") {
+        print "ERROR: Node '" current_name "' missing cpu field" > "/dev/stderr"
+        exit 1
+    }
+    if (current_cpu !~ /^[0-9]+$/ || current_cpu + 0 <= 0) {
+        print "ERROR: Node '" current_name "' has invalid cpu value: " current_cpu > "/dev/stderr"
+        exit 1
+    }
+
+    if (current_mem == "") {
+        print "ERROR: Node '" current_name "' missing mem field" > "/dev/stderr"
+        exit 1
+    }
+    if (current_mem !~ /^[0-9]+([MG])?$/) {
+        print "ERROR: Node '" current_name "' has invalid mem value: " current_mem > "/dev/stderr"
+        exit 1
+    }
+
+    if (current_image != "" && !is_valid_image_filename(current_image)) {
+        print "ERROR: Invalid image filename: " current_image > "/dev/stderr"
+        print "       Must be filename only (no paths/spaces) with .qcow2, .raw, or .img extension" > "/dev/stderr"
+        exit 1
+    }
+
+    if (current_ip != "" && !is_valid_ipv4(current_ip)) {
+        print "ERROR: Invalid IPv4 address: " current_ip " (node: " current_name ")" > "/dev/stderr"
+        exit 1
+    }
+
+    if (current_arch != "" && !is_valid_arch(current_arch)) {
+        print "ERROR: Invalid architecture: " current_arch " (node: " current_name ")" > "/dev/stderr"
+        print "       Valid values: amd64, arm64, arm" > "/dev/stderr"
+        exit 1
+    }
+
+    if ((current_cpu_type != "" || current_machine_type != "") && current_arch == "") {
+        print "ERROR: Architecture must be specified when using custom cpu_type or machine_type (node: " current_name ")" > "/dev/stderr"
+        print "       Please add: arch: amd64|arm64|arm" > "/dev/stderr"
+        exit 1
+    }
+
+    if (current_uefi != "" && current_uefi != "true" && current_uefi != "false") {
+        print "ERROR: Invalid uefi value: " current_uefi " (node: " current_name ")" > "/dev/stderr"
+        print "       Valid values: true, false" > "/dev/stderr"
+        exit 1
+    }
+
+    if (node_args != "") node_args = node_args " "
+    node_args = node_args current_name "|" current_image "|" current_ip "|" current_arch "|" current_machine_type "|" current_cpu_type "|" current_cpu "|" current_mem "|" current_uefi
+    node_count++
+}
+
+# Parse a "key: value" line (already stripped of leading list '- ' if needed)
+function parse_kv(line,    key, val) {
+    # Expect key: value
+    if (match(line, /^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*:[[:space:]]*(.*)$/, m)) {
+        key = m[1]
+        val = unquote(m[2])
+
+        if (key == "name") current_name = val
+        else if (key == "cpu") current_cpu = trim(val)
+        else if (key == "mem" || key == "ram") current_mem = trim(val)
+        else if (key == "image") current_image = val
+        else if (key == "ip") current_ip = trim(val)
+        else if (key == "arch") current_arch = trim(val)
+        else if (key == "machine_type") current_machine_type = trim(val)
+        else if (key == "cpu_type") current_cpu_type = trim(val)
+        else if (key == "uefi") current_uefi = tolower(trim(val))
+        # Unknown keys are ignored (by design)
+        return 1
+    }
+    return 0
+}
+
+{
+    # strip comments safely
+    $0 = strip_comments($0)
+    # skip empty lines
+    if ($0 ~ /^[[:space:]]*$/) next
+}
+
+# Detect unit: section (top-level)
+# Allow leading spaces? No: must be top-level "unit:"
+/^unit:[[:space:]]*$/ {
+    in_unit = 1
+    in_node_configs = 0
+    unit_indent = indent_len($0)  # should be 0
+    next
+}
+
+# Exit unit section if we hit another top-level key (not indented)
+/^[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*/ && indent_len($0) == 0 && in_unit && $0 !~ /^unit:/ {
+    in_unit = 0
+    in_node_configs = 0
+    node_configs_indent = -1
+    next
+}
+
+# Detect node_configs under unit (indent > unit)
+in_unit && $0 ~ /^[[:space:]]+node_configs:[[:space:]]*$/ {
+    in_node_configs = 1
+    node_configs_indent = indent_len($0)
+    next
+}
+
+# Exit node_configs when indentation returns to node_configs_indent or less
+# and the line looks like a mapping key (not a list item)
+in_node_configs {
+    ind = indent_len($0)
+    if (ind <= node_configs_indent && $0 ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*/ ) {
+        in_node_configs = 0
+        # do not next; allow other handlers if needed
+    }
+}
+
+# Parse nodes
+in_node_configs {
+    # New list item: "- ..." at indentation > node_configs_indent
+    if (match($0, /^[[:space:]]*-[[:space:]]*(.*)$/, m)) {
+        # If it's a list item at/under node_configs, treat as node start
+        flush_node()
+        reset_node()
+
+        rest = m[1]
+        rest = trim(rest)
+        if (rest != "") {
+            # Support "- key: value" for any key
+            parse_kv(rest)
+        }
+        next
+    }
+
+    # Regular property line within node item
+    parse_kv($0)
+    next
+}
+
+END {
+    flush_node()
+    secondary_count = (node_count > 0) ? node_count - 1 : 0
+    print "SECONDARY_COUNT=" secondary_count
+    print "NODE_ARGS=\"" node_args "\""
+}

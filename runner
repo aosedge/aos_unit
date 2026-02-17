@@ -1,0 +1,639 @@
+#!/usr/bin/env bash
+# aos-unit-runner - Unified VM Runner with Config Parsing
+# Copyright (c) 2018-2026 EPAM Systems Inc.
+
+set -Eeuo pipefail
+shopt -s nullglob
+
+LIBEXEC_DIR="$(dirname "$(realpath "$0")")"
+readonly LOG_TAG="aos-unit:runner"
+. "${LIBEXEC_DIR}/log-helper"
+
+: "${RUNTIME_DIRECTORY:?RUNTIME_DIRECTORY is undefined. Check systemd unit.}"
+: "${STATE_DIRECTORY:?STATE_DIRECTORY is undefined. Check systemd unit.}"
+: "${LOGS_DIRECTORY:?LOGS_DIRECTORY is undefined. Check systemd unit.}"
+: "${CONFIGURATION_DIRECTORY:?CONFIGURATION_DIRECTORY is undefined. Check systemd unit.}"
+
+readonly RUNTIME_CONFIG="${CONFIGURATION_DIRECTORY}/runtime.conf"
+source "$RUNTIME_CONFIG"
+
+: "${BRIDGE_NAME:?BRIDGE_NAME missing in $RUNTIME_CONFIG}"
+: "${BRIDGE_IP:?BRIDGE_IP missing in $RUNTIME_CONFIG}"
+
+readonly EXIT_CONFIG_ERROR=2
+readonly EXIT_RUNTIME_ERROR=1
+
+readonly MAC_PREFIX="52:54:00"
+readonly IMAGE_PREFIX="aos-vm-"
+
+readonly DEFAULT_CONFIG_PATH="${CONFIGURATION_DIRECTORY}/unit_config.yaml"
+readonly AWK_PARSER="${LIBEXEC_DIR}/config-parser"
+readonly DEFAULT_IMGS_PATH="${STATE_DIRECTORY}"
+
+readonly DEFAULT_MACHINE_TYPE_AMD64="q35"
+readonly DEFAULT_MACHINE_TYPE_ARM64="virt"
+readonly DEFAULT_CPU_TYPE_AMD64="max"
+readonly DEFAULT_CPU_TYPE_ARM64="cortex-a57"
+
+readonly QEMU_DEBUG_OPTIONS="guest_errors,nochain"
+
+readonly OVMF_CODE_X86="/usr/share/OVMF/OVMF_CODE_4M.fd"
+readonly OVMF_VARS_X86="/usr/share/OVMF/OVMF_VARS_4M.fd"
+readonly OVMF_CODE_ARM="/usr/share/AAVMF/AAVMF_CODE.fd"
+readonly OVMF_VARS_ARM="/usr/share/AAVMF/AAVMF_VARS.fd"
+
+readonly DISK_FORMAT="qcow2"
+
+detect_host_arch() {
+    case "$(uname -m)" in
+        x86_64)
+            echo "x86_64"
+            ;;
+        aarch64)
+            echo "aarch64"
+            ;;
+        *)
+            die "$EXIT_CONFIG_ERROR" "Unsupported host architecture: $(uname -m)"
+            ;;
+    esac
+}
+
+HOST_ARCH="$(detect_host_arch)"
+readonly HOST_ARCH
+log "Host architecture: $HOST_ARCH"
+
+check_kvm_available() {
+    local vm_arch="$1"
+
+    if [[ ! -e /dev/kvm ]]; then
+        return 1
+    fi
+    if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+        return 1
+    fi
+    if [[ $vm_arch != "$HOST_ARCH" ]]; then
+        return 1
+    fi
+    return 0
+}
+
+readonly RUNNER_PID_FILE="${RUNTIME_DIRECTORY}/runner.pid"
+
+CONFIG_FILE=""
+IMAGE_DIR=""
+SECONDARY_COUNT=0
+declare -a NODE_SPECS=()
+
+parse_config_file() {
+    local config_file="$1"
+    local images_path="$2"
+
+    log "Reading configuration from $config_file..."
+
+    if [[ ! -f $AWK_PARSER ]]; then
+        die "$EXIT_CONFIG_ERROR" "Config parser not found: $AWK_PARSER"
+    fi
+    if [[ ! -f $config_file ]]; then
+        die "$EXIT_CONFIG_ERROR" "Configuration file not found: $config_file"
+    fi
+
+    local parse_output
+    if ! parse_output="$(awk -f "$AWK_PARSER" "$config_file" 2>&1)"; then
+        error_multi <<<"$parse_output"
+        die "$EXIT_CONFIG_ERROR" "Failed to parse YAML configuration"
+    fi
+
+    local node_args=""
+    local secondary_count=""
+
+    while IFS='=' read -r key value; do
+        key="${key//[[:space:]]/}"
+        value="${value%\"}"
+        value="${value#\"}"
+
+        case "$key" in
+            NODE_ARGS)
+                node_args="$value"
+                ;;
+            SECONDARY_COUNT)
+                secondary_count="$value"
+                ;;
+            "") ;;
+            *)
+                die "$EXIT_CONFIG_ERROR" "Unexpected parser output key: $key"
+                ;;
+        esac
+    done <<<"$parse_output"
+
+    if [[ -z $node_args ]]; then
+        die "$EXIT_CONFIG_ERROR" "No nodes found in configuration"
+    fi
+
+    if [[ $secondary_count == "null" || -z $secondary_count ]]; then
+        secondary_count=0
+    fi
+
+    log "Configuration valid. Secondary nodes: $secondary_count"
+
+    IMAGE_DIR="$images_path"
+    SECONDARY_COUNT="$secondary_count"
+
+    read -ra NODE_SPECS <<<"$node_args" || true
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --config)
+            [[ -n ${2:-} ]] || die "$EXIT_CONFIG_ERROR" "--config requires an argument"
+            CONFIG_FILE="$2"
+            shift 2
+            ;;
+        --images)
+            [[ -n ${2:-} ]] || die "$EXIT_CONFIG_ERROR" "--images requires an argument"
+            IMAGE_DIR="$2"
+            shift 2
+            ;;
+        -h | --help)
+            cat <<EOF
+Usage: $0 [OPTIONS]
+
+Options:
+    --config PATH     Configuration file (default: ${DEFAULT_CONFIG_PATH})
+    --images PATH     Images directory (default: ${DEFAULT_IMGS_PATH})
+    -h, --help        Show this help
+EOF
+            exit 0
+            ;;
+        -*)
+            die "$EXIT_CONFIG_ERROR" "Unknown option: $1"
+            ;;
+        *)
+            die "$EXIT_CONFIG_ERROR" "Unexpected argument: $1 (direct mode has been removed; use --config ${DEFAULT_CONFIG_PATH})"
+            ;;
+    esac
+done
+
+if [[ -z $CONFIG_FILE ]]; then
+    log "No config file specified, using default: $DEFAULT_CONFIG_PATH"
+    CONFIG_FILE="$DEFAULT_CONFIG_PATH"
+fi
+
+if [[ -z $IMAGE_DIR ]]; then
+    IMAGE_DIR="$DEFAULT_IMGS_PATH"
+fi
+
+if [[ ! -d $IMAGE_DIR ]]; then
+    die "$EXIT_CONFIG_ERROR" "Images directory not found: $IMAGE_DIR"
+fi
+
+parse_config_file "$CONFIG_FILE" "$IMAGE_DIR"
+
+if [[ -z $IMAGE_DIR ]]; then
+    die "$EXIT_CONFIG_ERROR" "Image directory not specified (use --images)"
+fi
+if [[ ! -d $IMAGE_DIR ]]; then
+    die "$EXIT_CONFIG_ERROR" "Image directory does not exist: $IMAGE_DIR"
+fi
+if [[ ! -r $IMAGE_DIR ]]; then
+    die "$EXIT_CONFIG_ERROR" "Image directory not readable: $IMAGE_DIR"
+fi
+if [[ ! $SECONDARY_COUNT =~ ^[0-9]+$ ]]; then
+    die "$EXIT_CONFIG_ERROR" "Invalid secondary count: $SECONDARY_COUNT"
+fi
+if [[ ${#NODE_SPECS[@]} -eq 0 ]]; then
+    die "$EXIT_CONFIG_ERROR" "No node specifications provided"
+fi
+
+log "Image directory: $IMAGE_DIR"
+log "Secondary nodes: $SECONDARY_COUNT"
+log "Node specifications: ${#NODE_SPECS[@]}"
+
+generate_mac() {
+    local name="$1"
+    local hash
+    hash="$(echo -n "$name" | md5sum | tr '[:lower:]' '[:upper:]')"
+    printf "%s:%s:%s:%s" "$MAC_PREFIX" "${hash:0:2}" "${hash:2:2}" "${hash:4:2}"
+}
+
+normalize_memory_for_systemd() {
+    local mem="$1"
+    if [[ $mem =~ ^[0-9]+$ ]]; then
+        echo "${mem}M"
+        return
+    fi
+    echo "$mem"
+}
+
+wait_for_unit_active() {
+    local unit_name="$1"
+    local timeout="${2:-10}"
+    local interval=0.2
+    local waited=0
+
+    while [[ $waited -lt $((timeout * 5)) ]]; do
+        if systemctl is-active --quiet "$unit_name" 2>/dev/null; then
+            return 0
+        fi
+        sleep "$interval"
+        ((++waited))
+    done
+    return 1
+}
+
+map_oci_to_qemu_arch() {
+    local oci_arch="$1"
+    case "$oci_arch" in
+        amd64)
+            echo "x86_64"
+            ;;
+        arm64)
+            echo "aarch64"
+            ;;
+        x86_64 | aarch64)
+            echo "$oci_arch"
+            ;;
+        *)
+            die "$EXIT_CONFIG_ERROR" "Unknown architecture: $oci_arch (supported: amd64, arm64, x86_64, aarch64)"
+            ;;
+    esac
+}
+
+declare -a NODES_TO_START=()
+
+log "Preparing nodes from configuration..."
+
+for node_spec in "${NODE_SPECS[@]}"; do
+    IFS='|' read -r name custom_image custom_ip custom_arch \
+        custom_machine_type custom_cpu_type cpu mem uefi_en <<<"$node_spec"
+
+    log "Processing node: $name"
+
+    if [[ -n $custom_arch ]]; then
+        arch="$(map_oci_to_qemu_arch "$custom_arch")"
+        log "    Architecture: $arch (explicit)"
+    else
+        arch="$HOST_ARCH"
+        log "    Architecture: $arch (host default)"
+    fi
+
+    if [[ -n $custom_image ]]; then
+        image_file="${IMAGE_DIR}/${custom_image}"
+        if [[ ! -f $image_file ]]; then
+            die "$EXIT_CONFIG_ERROR" "Custom image not found: $image_file (for node: $name)"
+        fi
+        log "    Image: $custom_image (custom)"
+    else
+        case "$arch" in
+            x86_64)
+                arch_suffix="amd64"
+                legacy_arch="qemux86-64"
+                ;;
+            aarch64)
+                arch_suffix="arm64"
+                legacy_arch="qemuarm64"
+                ;;
+            *) die "$EXIT_RUNTIME_ERROR" "Unknown architecture $arch!" ;;
+        esac
+
+        # Final regex: e.g., ^aos-vm-main-(amd64|qemux86-64)*\.qcow2$
+        img_regex="^${IMAGE_PREFIX}${name}-(${arch_suffix}|${legacy_arch}).*\.${DISK_FORMAT}$"
+
+        # Find the first file matching the regex
+        found_img=""
+        for file in "$IMAGE_DIR"/*; do
+            [[ -e $file ]] || continue # Skip if directory is empty
+
+            basename_file="${file##*/}"
+            if [[ $basename_file =~ $img_regex ]]; then
+                found_img="$basename_file"
+                break
+            fi
+        done
+
+        if [[ -n $found_img ]]; then
+            image_file="${IMAGE_DIR}/${found_img}"
+            log "  Image: $found_img (auto-discovered)"
+        else
+            die "$EXIT_CONFIG_ERROR" "Image not found for node: $name" "regex searched: $img_regex"
+        fi
+    fi
+
+    if [[ -n $custom_ip ]]; then
+        bridge_prefix="${BRIDGE_IP%/*}"
+        bridge_prefix="${bridge_prefix%.*}"
+        ip_test_prefix="${custom_ip%.*}"
+
+        if [[ $ip_test_prefix != "$bridge_prefix" ]]; then
+            die "$EXIT_CONFIG_ERROR" "Custom IP $custom_ip not in bridge subnet ${BRIDGE_IP} (for node: $name)"
+        fi
+
+        ip="$custom_ip"
+        log "    IP: $ip (static via DHCP reservation)"
+    else
+        ip=""
+        log "    IP: (dynamic via DHCP)"
+    fi
+
+    if [[ -n $custom_machine_type ]]; then
+        machine_type="$custom_machine_type"
+        log "    Machine type: $machine_type (custom)"
+    else
+        case "$arch" in
+            x86_64) machine_type="$DEFAULT_MACHINE_TYPE_AMD64" ;;
+            aarch64) machine_type="$DEFAULT_MACHINE_TYPE_ARM64" ;;
+        esac
+        log "    Machine type: $machine_type (default)"
+    fi
+
+    if [[ -n $custom_cpu_type ]]; then
+        cpu_type="$custom_cpu_type"
+        log "    CPU type: $cpu_type (custom)"
+    else
+        case "$arch" in
+            x86_64) cpu_type="$DEFAULT_CPU_TYPE_AMD64" ;;
+            aarch64) cpu_type="$DEFAULT_CPU_TYPE_ARM64" ;;
+        esac
+        log "    CPU type: $cpu_type (default)"
+    fi
+
+    if [[ ${ENABLE_KVM:-false} == "false" ]]; then
+        use_kvm="false"
+        log "    KVM: is not enabled (ENABLE_KVM is undefined or set to 'false')"
+    elif check_kvm_available "$arch"; then
+        use_kvm="true"
+        log "    KVM: enabled (native architecture)"
+    else
+        use_kvm="false"
+        if [[ $arch != "$HOST_ARCH" ]]; then
+            log "    KVM: disabled (cross-arch: host=$HOST_ARCH, vm=$arch)"
+        else
+            log "    KVM: disabled (/dev/kvm not available)"
+        fi
+    fi
+
+    uefi_boot="false"
+    if [[ -n $uefi_en && $uefi_en != "null" ]]; then
+        uefi_boot="${uefi_en,,}" # Force lowercase for safety
+        log "  Boot mode: UEFI=${uefi_boot} (explicit config)"
+    elif [[ ${image_file,,} == *uefi* ]]; then
+        uefi_boot="true"
+        log "  Boot mode: UEFI=true (auto-detected from filename)"
+    else
+        log "  Boot mode: UEFI=false (default)"
+    fi
+
+    mac="$(generate_mac "$name")"
+    log "    MAC: $mac"
+    log "    CPU: $cpu, Memory: $mem"
+
+    NODES_TO_START+=("${name}|${image_file}|${arch}|${mac}|${ip}|${cpu}|${mem}|${machine_type}|${cpu_type}|${use_kvm}|${uefi_boot}")
+done
+
+if [[ ${#NODES_TO_START[@]} -eq 0 ]]; then
+    die "$EXIT_CONFIG_ERROR" "No valid nodes prepared"
+fi
+log "Prepared ${#NODES_TO_START[@]} node(s) for startup"
+
+cleanup_transient_unit() {
+    local unit="aos-node-${1}"
+    local svc="${unit}.service"
+
+    if systemctl show "$svc" >/dev/null 2>&1; then
+        systemctl stop "$svc" 2>/dev/null || true
+        systemctl reset-failed "$svc" 2>/dev/null || true
+    fi
+
+    local frag
+    frag="$(systemctl show -p FragmentPath --value "$svc" 2>/dev/null || true)"
+    if [[ $frag == "/run/systemd/transient/${svc}" ]]; then
+        rm -f "$frag" 2>/dev/null || true
+        systemctl daemon-reload 2>/dev/null || true
+    fi
+}
+
+start_qemu_vm() {
+    local node_name="$1"
+    local image_path="$2"
+    local arch="$3"
+    local mac_addr="$4"
+    local ip="$5"
+    local cpu_count="$6"
+    local memory="$7"
+    local machine_type="$8"
+    local cpu_type="$9"
+    local use_kvm="${10}"
+    local uefi_boot="${11}"
+
+    log "Starting VM: $node_name"
+    log "    Image: $(basename "$image_path")"
+    log "    Architecture: $arch"
+    log "    KVM: $use_kvm"
+    log "    Machine: $machine_type, CPU: $cpu_type"
+    log "    Resources: ${cpu_count} vCPU, ${memory} RAM"
+
+    if [[ -n $ip ]]; then
+        log "    Network: MAC=$mac_addr, IP=$ip (static)"
+    else
+        log "    Network: MAC=$mac_addr, IP=(dynamic)"
+    fi
+
+    local qmp_socket="${RUNTIME_DIRECTORY}/${node_name}.qmp"
+    local unit_name="aos-node-${node_name}"
+
+    local qemu_cmd=(
+        "qemu-system-${arch}"
+        -name "$node_name"
+        -drive "file=${image_path},if=none,id=aos-image,format=${DISK_FORMAT}"
+        -device "virtio-scsi-pci,id=scsi"
+        -device "scsi-hd,drive=aos-image"
+        -machine "$machine_type"
+    )
+
+    if [[ $use_kvm == "true" ]]; then
+        qemu_cmd+=(-enable-kvm)
+
+        # KVM implementation for Arm practically demands -cpu host to function properly
+        if [[ $arch == "aarch64" ]]; then
+            qemu_cmd+=(-cpu host)
+        else
+            qemu_cmd+=(-cpu "$cpu_type")
+        fi
+    else
+        qemu_cmd+=(-cpu "$cpu_type")
+    fi
+
+    if [[ $uefi_boot == "true" ]]; then
+        local ovmf_code=""
+        local ovmf_vars=""
+        local ovmf_vars_vm="${RUNTIME_DIRECTORY}/${node_name}-VARS.fd"
+
+        case "$arch" in
+            x86_64)
+                ovmf_code="$OVMF_CODE_X86"
+                ovmf_vars="$OVMF_VARS_X86"
+                ;;
+            aarch64)
+                ovmf_code="$OVMF_CODE_ARM"
+                ovmf_vars="$OVMF_VARS_ARM"
+                ;;
+        esac
+
+        if [[ -f $ovmf_code && -f $ovmf_vars ]]; then
+            # Copy fresh NVRAM for this specific VM if it doesn't exist
+            if [[ ! -f $ovmf_vars_vm ]]; then
+                cp "$ovmf_vars" "$ovmf_vars_vm"
+                log "    Created UEFI vars: $(basename "$ovmf_vars_vm")"
+            fi
+
+            # Mount the read-only CODE and read-write VARS as pflash drives
+            qemu_cmd+=(
+                -drive "if=pflash,format=raw,readonly=on,file=${ovmf_code}"
+                -drive "if=pflash,format=raw,file=${ovmf_vars_vm}"
+            )
+        else
+            die "$EXIT_RUNTIME_ERROR" "UEFI requested but firmware missing for $arch at $ovmf_code"
+        fi
+    fi
+
+    local socket_path="${RUNTIME_DIRECTORY}/${node_name}.serial"
+    local serial_log_path="${LOGS_DIRECTORY}/${node_name}-serial.log"
+    local debug_log_path="${LOGS_DIRECTORY}/${node_name}-debug.log"
+    # usage:
+    #   sudo socat -,raw,echo=0,escape=0x1d "UNIX-CONNECT:${socket_path}"
+    qemu_cmd+=(
+        -smp "cpus=${cpu_count}"
+        -m "$memory"
+        -nic "bridge,br=${BRIDGE_NAME},model=virtio-net-pci,mac=${mac_addr}"
+        -display none
+        -vga none
+        -chardev "socket,id=char0,path=${socket_path},server=on,wait=off,logfile=${serial_log_path},logappend=on"
+        -serial "chardev:char0"
+        -d "$QEMU_DEBUG_OPTIONS"
+        -D "${debug_log_path}"
+        -qmp "unix:${qmp_socket},server,nowait"
+    )
+
+    # On every startup qemu will overwrite its own logs
+    # In order not to lose them, enforce debug log rotation
+    if [[ -f $debug_log_path ]]; then
+        log "  Forcing log rotation for previous debug session..."
+        local lr_conf="${RUNTIME_DIRECTORY}/${node_name}-logrotate.conf"
+        local lr_status="${RUNTIME_DIRECTORY}/${node_name}-logrotate.status"
+
+        # Temporary logrotate config
+        cat >"$lr_conf" <<EOF
+"${debug_log_path}" {
+    rotate 5
+    missingok
+    notifempty
+    copytruncate
+    compress
+    delaycompress
+}
+EOF
+        logrotate -s "$lr_status" -f "$lr_conf"
+        rm -f "$lr_conf" "$lr_status"
+    fi
+
+    log "    Launching via systemd (unit: $unit_name)"
+
+    local systemd_mem
+    systemd_mem="$(normalize_memory_for_systemd "$memory")"
+
+    local exec_start_pre="${LIBEXEC_DIR}/network-helper add-vm ${mac_addr} ${node_name}"
+    if [[ -n $ip ]]; then
+        exec_start_pre="${exec_start_pre} ${ip}"
+    fi
+
+    local exec_stop_post="${LIBEXEC_DIR}/network-helper del-vm ${mac_addr} ${node_name}"
+    if [[ -n $ip ]]; then
+        exec_stop_post="${exec_stop_post} ${ip}"
+    fi
+
+    cleanup_transient_unit "${node_name}"
+
+    systemd-run \
+        --unit="$unit_name" \
+        --slice=aos-unit.slice \
+        --property="Type=simple" \
+        --property="User=aos-unit" \
+        --property="Group=aos-unit" \
+        --property="AmbientCapabilities=CAP_NET_ADMIN" \
+        --property="MemoryMax=${systemd_mem}" \
+        --property="OOMPolicy=kill" \
+        --property="CPUQuota=$((cpu_count * 100))%" \
+        --property="Restart=on-failure" \
+        --property="RestartSec=${HEALTH_RESTART_SEC:-5s}" \
+        --property="StartLimitIntervalSec=${HEALTH_RESTART_WINDOW:-300}" \
+        --property="StartLimitBurst=${HEALTH_MAX_RESTARTS:-3}" \
+        --property="TimeoutStartSec=${VM_START_TIMEOUT:-60s}" \
+        --property="TimeoutStopSec=${VM_STOP_TIMEOUT:-60s}" \
+        --property="KillMode=mixed" \
+        --property="KillSignal=SIGTERM" \
+        --property="SendSIGKILL=yes" \
+        --property="After=aos-unit.service" \
+        --property="BindsTo=aos-unit.service" \
+        --property="ExecStartPre=${exec_start_pre}" \
+        --property="ExecStopPost=${exec_stop_post}" \
+        --property="OnFailure=aos-unit-vm-failed@${unit_name}.service" \
+        --description="AosEdge Unit VM: ${node_name} (${arch})" \
+        --property="SyslogIdentifier=$unit_name" \
+        --property="StandardOutput=journal" \
+        --property="StandardError=journal" \
+        --property="RuntimeDirectory=aos-unit" \
+        --property="ConfigurationDirectory=aos-unit" \
+        --property="LogsDirectory=aos-unit" \
+        --property="StateDirectory=aos-unit" \
+        --quiet -- \
+        "${qemu_cmd[@]}"
+
+    if ! wait_for_unit_active "$unit_name" 10; then
+        die "${EXIT_RUNTIME_ERROR}" "Timeout waiting for unit to start: $node_name (check: systemctl status $unit_name)"
+    fi
+
+    local pid
+    pid="$(systemctl show -p MainPID --value "$unit_name" 2>/dev/null || true)"
+    if [[ -z $pid || $pid == "0" ]]; then
+        die "${EXIT_RUNTIME_ERROR}" "Unit started but MainPID not found: $node_name"
+    fi
+
+    log "    Started successfully (PID: $pid)"
+    log "    Access via: ssh ${node_name}.aos-unit"
+}
+
+cleanup() {
+    log "Runner shutting down..."
+
+    local units=()
+    mapfile -t units < <(systemctl list-units --no-legend 'aos-node-*' 2>/dev/null | awk '{print $1}')
+
+    if [[ ${#units[@]} -gt 0 ]]; then
+        log "Stopping ${#units[@]} VM unit(s)..."
+        for unit in "${units[@]}"; do
+            systemctl stop "$unit" 2>/dev/null || true
+        done
+        sleep 2
+    fi
+
+    rm -f "$RUNNER_PID_FILE" 2>/dev/null || true
+    log "Cleanup complete"
+}
+
+trap cleanup EXIT SIGTERM SIGINT
+
+log "AosEdge Unit Runner starting (PID: $$)"
+
+echo $$ >"$RUNNER_PID_FILE"
+log "PID file created: $RUNNER_PID_FILE"
+
+log "Starting QEMU VMs..."
+
+for node in "${NODES_TO_START[@]}"; do
+    IFS='|' read -r name image arch mac ip cpu mem machine cpu_type use_kvm uefi_boot <<<"$node"
+    start_qemu_vm "$name" "$image" "$arch" "$mac" "$ip" "$cpu" "$mem" "$machine" "$cpu_type" "$use_kvm" "$uefi_boot"
+done
+
+log "All VMs started successfully"
+log "Runner active - VMs managed by systemd"
+
+sleep infinity

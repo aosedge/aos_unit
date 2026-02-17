@@ -1,0 +1,112 @@
+[Unit]
+Description=AosEdge Unit VM Manager
+Documentation=man:aos-unit(8) man:aos-unit.conf(5)
+After=network-online.target
+Wants=network-online.target
+
+# Limit restart attempts to prevent infinite loops on runtime errors
+StartLimitBurst=5
+StartLimitIntervalSec=60s
+
+[Service]
+Type=simple
+
+# User and Group
+# SECURITY: Run as dedicated user instead of root when possible
+# Ensure this user has 'kvm' group membership for /dev/kvm access
+User=aos-unit
+Group=aos-unit
+SupplementaryGroups=kvm
+
+# Hooks for network configuration
+ExecStartPre=/usr/libexec/aos-unit/service-startup
+ExecStartPost=/usr/libexec/aos-unit/network-helper add-nat
+ExecStopPre=/usr/libexec/aos-unit/network-helper del-nat
+ExecStopPost=/usr/libexec/aos-unit/service-cleanup
+
+# CRITICAL: Grant networking privileges to the non-root user
+# Without these capabilities, the aos-unit user cannot:
+# - Create network bridges (ip link add)
+# - Modify network interfaces (ip addr add, ip link set)
+# - Configure nftables rules
+# - Run dnsmasq on privileged ports
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+
+# Runtime directory (creates e.g. /run/aos-unit, owned by aos-unit, auto-cleanup on stop)
+RuntimeDirectory=aos-unit
+StateDirectory=aos-unit
+LogsDirectory=aos-unit
+ConfigurationDirectory=aos-unit
+
+# Main service command
+ExecStart=/usr/libexec/aos-unit/runner
+
+# Restart policy: restart on runtime failures, but not on configuration errors
+Restart=on-failure
+RestartSec=10s
+
+# DO NOT restart if the script exits with code 2 (Configuration Error)
+# Exit codes:
+#   0 = Success (clean shutdown)
+#   1+ = Runtime error (restart allowed)
+#   2 = Configuration error (do NOT restart - needs manual fix)
+RestartPreventExitStatus=2
+
+# Process management
+# KillMode=control-group ensures systemd cleans up QEMU processes
+# Script uses exec, so systemd tracks the actual runner process
+KillMode=control-group
+
+# Allow time for QEMU VMs to shutdown gracefully
+TimeoutStopSec=120s
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aos-unit
+
+# Environment
+# Use deterministic PATH
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Security Hardening (Production-Safe Subset)
+# These options improve security without breaking QEMU/networking
+
+# Prevent privilege escalation
+NoNewPrivileges=true
+
+# Isolate /tmp from other services
+PrivateTmp=true
+
+# Protect kernel interfaces from modification
+ProtectControlGroups=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+
+# Additional Hardening (COMMENTED - requires thorough testing)
+# CAUTION: These may break QEMU or networking functionality
+
+# Protect system directories from writes
+# 'full' = read-only /usr, /boot, /efi; read-write /etc, /var
+# WARNING: May prevent QEMU from accessing VM images in /var/lib/aos-unit
+#ProtectSystem=full
+
+# Isolate home directories
+# WARNING: Will break if VM images are stored in /home
+#ProtectHome=true
+
+# Restrict address families
+# WARNING: Ensure all required protocols are listed
+#RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+# Additional restrictions (test thoroughly before enabling)
+#RestrictRealtime=true
+#RestrictNamespaces=true
+#LockPersonality=true
+
+# WARNING: Breaks QEMU JIT compiler - do NOT enable
+#MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

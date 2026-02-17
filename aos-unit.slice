@@ -1,0 +1,25 @@
+[Unit]
+Description=AosEdge Unit VMs
+Documentation=man:aos-unit(8)
+Before=slices.target
+
+[Slice]
+# --- CPU Configuration ---
+# Maximum CPU quota for all VMs combined (percentage, 8 cores)
+CPUQuota=800%
+# Ensure VMs yield to host processes under heavy load
+CPUWeight=50
+
+# --- Memory Configuration ---
+# Hard kill limit
+MemoryMax=32G
+# Throttle limit (slows down VMs before they hit the hard kill)
+MemoryHigh=30G
+# Prevent VMs from thrashing host storage with heavy swap usage
+MemorySwapMax=1G
+
+# --- I/O and Process Limits ---
+# Lower than default (100) to ensure host/orchestrator IO priority
+IOWeight=50
+# Prevent PID exhaustion / fork bombs from rogue QEMU instances
+TasksMax=4096

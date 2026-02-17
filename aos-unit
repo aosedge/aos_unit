@@ -1,0 +1,10 @@
+/var/log/aos-unit/*.log {
+    hourly
+    rotate 24
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    maxsize 50M
+}
