@@ -32,12 +32,14 @@ For complete configuration syntax, refer to the manual pages: man aos-unit.conf(
   Install to system state directory  
   `sudo cp aos-vm-main-qemux86-64.qcow2 aos-vm-secondary-qemux86-64.qcow2 /var/lib/aos-unit/`  
   `sudo chown aos-unit:aos-unit /var/lib/aos-unit/*.qcow2`  
-3. **Define Your Nodes:** Edit `/etc/aos-unit/unit_config.yaml` to specify your cluster layout. Check your static IPs fit the DHCP subnet in `/etc/aos-unit/runtime.conf`f and update if needed.  
+3. **Check Configured Nodes:** Take a look at `/etc/aos-unit/unit_config.yaml` to check the supplied sample cluster layout. It defines 2 nodes that will run on `aos-vm-main-qemux86-64.qcow2` and `aos-vm-secondary-qemux86-64.qcow2` images you have just downloaded. Network is configured with static IP to the __main__ node and dynamic IP to the __secondary__ node; both IPs are from the DHCP subnet defined in `/etc/aos-unit/runtime.conf`. For quick start - do not change any configuration, it will work out of the box!  
 4. **Launch the Unit:**  
    `sudo systemctl start aos-unit`  
-5. **Access Your Nodes:** Thanks to the DNS Sidecar, VMs are immediately accessible by their YAML names.  
-   `ssh main.aos-unit`
+5. **Access Your Nodes:** Thanks to the DNS Sidecar, VMs are immediately accessible by their YAML names wuth SSH (use `Password1`).  
+   `ssh root@main.aos-unit`  
+   `ssh root@secondary.aos-unit`  
 
+Congratulations! You have successfully deployed your virtual AosEdge Unit. Now you need to provision it and it will be ready tor run your edge services!  
 ## Architecture & Core Principles
 
 The architecture favors determinism, explicit failure semantics, and controlled recovery over opaque background behavior.
