@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# Service post-exit shutdown
+# Copyright (c) 2018-2026 EPAM Systems Inc.
+
+set -Eeuo pipefail
 
 LIBEXEC_DIR="$(dirname "$(realpath "$0")")"
-LOG_TAG="aos-unit:cleanup"
+readonly LIBEXEC_DIR
+readonly LOG_TAG="aos-unit:cleanup"
 . "${LIBEXEC_DIR}/log-helper"
 
 : "${RUNTIME_DIRECTORY:?RUNTIME_DIRECTORY is undefined. Check systemd unit.}"
@@ -13,10 +17,10 @@ source "$RUNTIME_CONFIG"
 
 : "${BRIDGE_NAME:?BRIDGE_NAME missing in $RUNTIME_CONFIG}"
 
-NET_LOCK="${RUNTIME_DIRECTORY}/net.lock"
+readonly NET_LOCK="${RUNTIME_DIRECTORY}/net.lock"
 
-DNSMASQ_UNIT="aos-unit-dnsmasq"
-DNSMASQ_SERVICE="${DNSMASQ_UNIT}.service"
+readonly DNSMASQ_UNIT="aos-unit-dnsmasq"
+readonlyDNSMASQ_SERVICE="${DNSMASQ_UNIT}.service"
 
 mkdir -p "$RUNTIME_DIRECTORY"
 exec 9>"$NET_LOCK"

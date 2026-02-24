@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# DHCP lease hook for registration/unregistration of DNS
+# Copyright (c) 2018-2026 EPAM Systems Inc.
+
+set -Eeuo pipefail
 
 LIBEXEC_DIR="$(dirname "$(realpath "$0")")"
+readonly LIBEXEC_DIR
 
 : "${RUNTIME_DIRECTORY:?RUNTIME_DIRECTORY undefined}"
 : "${CONFIGURATION_DIRECTORY:?CONFIGURATION_DIRECTORY undefined}"

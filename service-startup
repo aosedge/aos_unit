@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# Service network pre-initialization
+# Copyright (c) 2018-2026 EPAM Systems Inc.
+
+set -Eeuo pipefail
 
 LIBEXEC_DIR="$(dirname "$(realpath "$0")")"
+readonly LIBEXEC_DIR
 readonly LOG_TAG="aos-unit:startup"
 . "${LIBEXEC_DIR}/log-helper"
 
@@ -182,6 +186,7 @@ dns_test_out=$(/usr/sbin/dnsmasq --test --conf-file="$CONF_FILE" 2>&1) || {
 log "Starting dnsmasq as transient unit: ${DNSMASQ_SERVICE}"
 systemd-run \
     --unit="$DNSMASQ_UNIT" \
+    --description="AosEdge dnsmasq (${DNS_DOMAIN}:${BRIDGE_IP})" \
     --property="Type=simple" \
     --property="BindsTo=aos-unit.service" \
     --property="User=aos-unit" \

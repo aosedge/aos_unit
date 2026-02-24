@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# Handling QEMU service failures
+# Copyright (c) 2018-2026 EPAM Systems Inc.
+
+set -Eeuo pipefail
 
 LIBEXEC_DIR="$(dirname "$(realpath "$0")")"
+readonly LIBEXEC_DIR
 readonly LOG_TAG="aos-unit:vm-failed"
 . "${LIBEXEC_DIR}/log-helper"
 

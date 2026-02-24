@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# Network management helper functions for VM, NAT, DHCP callbacks
+# Copyright (c) 2018-2026 EPAM Systems Inc.
+
+set -Eeuo pipefail
 
 LIBEXEC_DIR="$(dirname "$(realpath "$0")")"
+readonly LIBEXEC_DIR
 readonly LOG_TAG="aos-unit:network-helper"
 . "${LIBEXEC_DIR}/log-helper"
 
@@ -29,6 +33,9 @@ readonly HOSTS_FILE="$RUNTIME_DIRECTORY/dnsmasq.d/hosts"
 
 readonly DNSMASQ_UNIT="aos-unit-dnsmasq"
 readonly DNSMASQ_SERVICE="${DNSMASQ_UNIT}.service"
+
+readonly ROUTEMONITOR_UNIT="aos-unit-route-monitor"
+readonly ROUTEMONITOR_SERVICE="${ROUTEMONITOR_UNIT}.service"
 
 mkdir -p "$RUNTIME_DIRECTORY/dnsmasq.d"
 touch "$HOSTS_FILE"
@@ -98,19 +105,25 @@ EOF
 
     # Spawn Monitor only if not already running and no static interface forced
     if [[ -z ${INTERNET_INTERFACE:-} ]]; then
-        if systemctl is-active --quiet "aos-unit-route-monitor.service"; then
+        if systemctl is-active --quiet "${ROUTEMONITOR_SERVICE}"; then
             return 0
         fi
 
         log "Starting dynamic route-monitor..."
         systemd-run \
-            --unit="aos-unit-route-monitor" \
-            --property="Description=AosEdge Route Monitor (Uplink: ${uplink:-None})" \
+            --unit="${ROUTEMONITOR_SERVICE}" \
+            --description="AosEdge Route Monitor (Uplink: ${uplink:-None})" \
+            --property="Type=simple" \
             --property="BindsTo=aos-unit.service" \
+            --property="User=aos-unit" \
+            --property="Group=aos-unit" \
+            --property="AmbientCapabilities=CAP_NET_ADMIN" \
+            --property="CapabilityBoundingSet=CAP_NET_ADMIN" \
             --property="Restart=always" \
             --property="RestartSec=2s" \
-            --property="CapabilityBoundingSet=CAP_NET_ADMIN" \
-            --property="AmbientCapabilities=CAP_NET_ADMIN" \
+            --property="KillMode=mixed" \
+            --property="KillSignal=SIGTERM" \
+            --property="SendSIGKILL=yes" \
             --setenv="RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" \
             --setenv="CONFIGURATION_DIRECTORY=${CONFIGURATION_DIRECTORY}" \
             --quiet -- \
@@ -120,9 +133,9 @@ EOF
 
 del_nat() {
     # Kill the monitor immediately so it doesn't try to re-add rules while we are cleaning them up.
-    if systemctl is-active --quiet "aos-unit-route-monitor.service"; then
+    if systemctl is-active --quiet "${ROUTEMONITOR_SERVICE}"; then
         log "Stopping route monitor..."
-        systemctl stop "aos-unit-route-monitor.service" 2>/dev/null || true
+        systemctl stop "${ROUTEMONITOR_SERVICE}" 2>/dev/null || true
     fi
 
     lock

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# aos-unit-runner - Unified VM Runner with Config Parsing
+# Unified VM Runner with Config Parsing
 # Copyright (c) 2018-2026 EPAM Systems Inc.
 
 set -Eeuo pipefail
 shopt -s nullglob
 
 LIBEXEC_DIR="$(dirname "$(realpath "$0")")"
+readonly LIBEXEC_DIR
 readonly LOG_TAG="aos-unit:runner"
 . "${LIBEXEC_DIR}/log-helper"
 
@@ -438,7 +439,7 @@ start_qemu_vm() {
     fi
 
     local qmp_socket="${RUNTIME_DIRECTORY}/${node_name}.qmp"
-    local unit_name="aos-node-${node_name}"
+    local unit_name="aos-unit-node-${node_name}"
 
     local qemu_cmd=(
         "qemu-system-${arch}"
@@ -554,11 +555,11 @@ EOF
 
     systemd-run \
         --unit="$unit_name" \
+        --description="AosEdge Unit VM: ${node_name} (${arch})" \
         --slice=aos-unit.slice \
         --property="Type=simple" \
         --property="User=aos-unit" \
         --property="Group=aos-unit" \
-        --property="AmbientCapabilities=CAP_NET_ADMIN" \
         --property="MemoryMax=${systemd_mem}" \
         --property="OOMPolicy=kill" \
         --property="CPUQuota=$((cpu_count * 100))%" \
@@ -576,10 +577,6 @@ EOF
         --property="ExecStartPre=${exec_start_pre}" \
         --property="ExecStopPost=${exec_stop_post}" \
         --property="OnFailure=aos-unit-vm-failed@${unit_name}.service" \
-        --description="AosEdge Unit VM: ${node_name} (${arch})" \
-        --property="SyslogIdentifier=$unit_name" \
-        --property="StandardOutput=journal" \
-        --property="StandardError=journal" \
         --setenv="RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" \
         --setenv="CONFIGURATION_DIRECTORY=${CONFIGURATION_DIRECTORY}" \
         --quiet -- \
