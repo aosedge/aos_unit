@@ -111,10 +111,8 @@ EOF
             --property="RestartSec=2s" \
             --property="CapabilityBoundingSet=CAP_NET_ADMIN" \
             --property="AmbientCapabilities=CAP_NET_ADMIN" \
-            --property="RuntimeDirectory=aos-unit" \
-            --property="ConfigurationDirectory=aos-unit" \
-            --property="LogsDirectory=aos-unit" \
-            --property="StateDirectory=aos-unit" \
+            --setenv="RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" \
+            --setenv="CONFIGURATION_DIRECTORY=${CONFIGURATION_DIRECTORY}" \
             --quiet -- \
             /usr/bin/bash -c "ip monitor route | grep --line-buffered 'default' | while read -r _; do sleep 2; ${LIBEXEC_DIR}/network-helper add-nat; done"
     fi

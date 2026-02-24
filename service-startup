@@ -193,10 +193,8 @@ systemd-run \
     --property="KillMode=mixed" \
     --property="KillSignal=SIGTERM" \
     --property="SendSIGKILL=yes" \
-    --property="RuntimeDirectory=aos-unit" \
-    --property="ConfigurationDirectory=aos-unit" \
-    --property="LogsDirectory=aos-unit" \
-    --property="StateDirectory=aos-unit" \
+    --setenv="RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" \
+    --setenv="CONFIGURATION_DIRECTORY=${CONFIGURATION_DIRECTORY}" \
     --quiet -- \
     /usr/sbin/dnsmasq --keep-in-foreground --conf-file="$CONF_FILE"
 

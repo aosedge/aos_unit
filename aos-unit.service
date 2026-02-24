@@ -20,8 +20,8 @@ SupplementaryGroups=kvm
 
 # Hooks for network configuration
 ExecStartPre=/usr/libexec/aos-unit/service-startup
-ExecStartPost=/usr/libexec/aos-unit/network-helper add-nat
-ExecStopPre=/usr/libexec/aos-unit/network-helper del-nat
+ExecStartPre=/usr/libexec/aos-unit/network-helper add-nat
+ExecStopPost=/usr/libexec/aos-unit/network-helper del-nat
 ExecStopPost=/usr/libexec/aos-unit/service-cleanup
 
 # CRITICAL: Grant networking privileges to the non-root user

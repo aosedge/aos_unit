@@ -580,10 +580,8 @@ EOF
         --property="SyslogIdentifier=$unit_name" \
         --property="StandardOutput=journal" \
         --property="StandardError=journal" \
-        --property="RuntimeDirectory=aos-unit" \
-        --property="ConfigurationDirectory=aos-unit" \
-        --property="LogsDirectory=aos-unit" \
-        --property="StateDirectory=aos-unit" \
+        --setenv="RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" \
+        --setenv="CONFIGURATION_DIRECTORY=${CONFIGURATION_DIRECTORY}" \
         --quiet -- \
         "${qemu_cmd[@]}"
 
