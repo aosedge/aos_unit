@@ -24,9 +24,6 @@ unit_config.yaml etc/aos-unit/
 # System configuration
 99-aos-unit.conf etc/sysctl.d/
 
-# PolicyKit rule (allows aos-unit user to manage systemd units)
-10-aos-unit.rules etc/polkit-1/rules.d/
-
 # Logrotate configuration
 aos-unit etc/logrotate.d
 

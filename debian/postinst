@@ -48,10 +48,8 @@ AosEdge Unit installation complete!
 ==========================================
 
 Configuration files:
-  /etc/aos-unit/runtime.conf         - Infrastructure settings
-  /etc/aos-unit/unit_config.yaml     - Node definitions
-  /etc/sysctl.d/99-aos-unit.conf     - IP forwarding
-  /etc/polkit-1/rules.d/10-aos-unit.rules - PolicyKit permissions
+  /etc/aos-unit/runtime.conf           - Infrastructure settings
+  /etc/aos-unit/unit_config.yaml       - Node definitions
 Systemd units:
   /lib/systemd/system/aos-unit.service - Main service
   /lib/systemd/system/aos-unit.slice   - Resource management
@@ -64,24 +62,7 @@ Data directories:
   /var/log/aos-unit  - VM logs
 
 User command:
-  aos-unit  - Entry point (symlink to runner)
-
-Next steps:
-  1. Review /etc/aos-unit/runtime.conf (if needed)
-  2. Edit /etc/aos-unit/unit_config.yaml to define your nodes
-  3. Place VM images in /var/lib/aos-unit/
-     Format: aos-vm-<node>-<machine>.qcow2
-     Example: aos-vm-main-qemuarm64.qcow2
-  4. Enable and start the service:
-     sudo systemctl enable aos-unit
-     sudo systemctl start aos-unit
-     sudo systemctl status aos-unit
-
-For troubleshooting:
-  sudo journalctl -u aos-unit -f            # Main service
-  sudo journalctl -u 'aos-node-*' -f        # All VMs
-  sudo systemctl status aos-node-main       # Specific VM
-  sudo systemd-cgtop                        # Resource usage
+  aos-unit  - Entry point
 
 Documentation:
   man aos-unit

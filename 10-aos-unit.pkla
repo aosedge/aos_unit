@@ -1,0 +1,13 @@
+[Allow aos-unit to manage systemd units]
+Identity=unix-user:aos-unit
+Action=org.freedesktop.systemd1.manage-units
+ResultAny=yes
+ResultInactive=yes
+ResultActive=yes
+
+[Allow aos-unit to configure systemd-resolved]
+Identity=unix-user:aos-unit
+Action=org.freedesktop.resolve1.*
+ResultAny=yes
+ResultInactive=yes
+ResultActive=yes

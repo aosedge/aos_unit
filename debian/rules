@@ -1,4 +1,22 @@
 #!/usr/bin/make -f
 
+DEB_DIST := $(shell dpkg-parsechangelog -S Distribution)
+
 %:
 	dh $@
+
+override_dh_install:
+	# First install everything driven by debian/*.install, etc.
+	dh_install
+
+	# Then add the series-specific polkit override
+ifeq ($(DEB_DIST),jammy)
+	install -D -m 0644 10-aos-unit.pkla debian/aos-unit/var/lib/polkit-1/localauthority/10-vendor.d/10-aos-unit.pkla
+else
+	# noble, oracular, etc. -> JS rules (preferred on modern polkit)
+	install -D -m 0644 10-aos-unit.rules debian/aos-unit/usr/share/polkit-1/rules.d/10-aos-unit.rules
+endif
+	dh_missing --fail-missing
+
+override_dh_clean:
+	dh_clean
