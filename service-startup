@@ -193,13 +193,31 @@ systemd-run \
     --property="Group=aos-unit" \
     --property="AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW" \
     --property="CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW" \
+    --property="RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6" \
     --property="Restart=on-failure" \
     --property="RestartSec=1s" \
-    --property="KillMode=mixed" \
+    --property="KillMode=control-group" \
     --property="KillSignal=SIGTERM" \
+    --property="TimeoutStopSec=5s" \
     --property="SendSIGKILL=yes" \
     --setenv="RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" \
     --setenv="CONFIGURATION_DIRECTORY=${CONFIGURATION_DIRECTORY}" \
+    --property="NoNewPrivileges=yes" \
+    --property="PrivateTmp=yes" \
+    --property="ProtectSystem=strict" \
+    --property="ProtectHome=yes" \
+    --property="ProtectKernelTunables=yes" \
+    --property="ProtectKernelModules=yes" \
+    --property="ProtectControlGroups=yes" \
+    --property="ProtectKernelLogs=yes" \
+    --property="PrivateDevices=yes" \
+    --property="LockPersonality=yes" \
+    --property="MemoryDenyWriteExecute=yes" \
+    --property="RestrictNamespaces=yes" \
+    --property="RestrictRealtime=yes" \
+    --property="SystemCallArchitectures=native" \
+    --property="ReadWritePaths=${RUNTIME_DIRECTORY}" \
+    --property="ReadOnlyPaths=${CONFIGURATION_DIRECTORY}" \
     --quiet -- \
     /usr/sbin/dnsmasq --keep-in-foreground --conf-file="$CONF_FILE"
 

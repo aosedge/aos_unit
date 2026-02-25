@@ -1,7 +1,5 @@
 [Unit]
 Description=Aos-unit VM failed handler for %i
-BindsTo=aos-unit.service
-After=aos-unit.service
 
 [Service]
 Type=oneshot

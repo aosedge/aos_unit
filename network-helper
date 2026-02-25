@@ -119,23 +119,46 @@ EOF
             --property="Group=aos-unit" \
             --property="AmbientCapabilities=CAP_NET_ADMIN" \
             --property="CapabilityBoundingSet=CAP_NET_ADMIN" \
-            --property="Restart=always" \
-            --property="RestartSec=2s" \
-            --property="KillMode=mixed" \
+            --property="RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6" \
+            --property="Restart=on-failure" \
+            --property="RestartSec=1s" \
+            --property="KillMode=control-group" \
             --property="KillSignal=SIGTERM" \
+            --property="TimeoutStopSec=5s" \
             --property="SendSIGKILL=yes" \
             --setenv="RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" \
             --setenv="CONFIGURATION_DIRECTORY=${CONFIGURATION_DIRECTORY}" \
+            --property="NoNewPrivileges=yes" \
+            --property="PrivateTmp=yes" \
+            --property="ProtectSystem=strict" \
+            --property="ProtectHome=yes" \
+            --property="ProtectKernelTunables=yes" \
+            --property="ProtectKernelModules=yes" \
+            --property="ProtectControlGroups=yes" \
+            --property="ProtectKernelLogs=yes" \
+            --property="PrivateDevices=yes" \
+            --property="LockPersonality=yes" \
+            --property="MemoryDenyWriteExecute=yes" \
+            --property="RestrictNamespaces=yes" \
+            --property="RestrictRealtime=yes" \
+            --property="SystemCallArchitectures=native" \
+            --property="ReadWritePaths=${RUNTIME_DIRECTORY}" \
+            --property="ReadOnlyPaths=${CONFIGURATION_DIRECTORY}" \
             --quiet -- \
-            /usr/bin/bash -c "ip monitor route | grep --line-buffered 'default' | while read -r _; do sleep 2; ${LIBEXEC_DIR}/network-helper add-nat; done"
+            "${LIBEXEC_DIR}/route-monitor"
     fi
 }
 
 del_nat() {
     # Kill the monitor immediately so it doesn't try to re-add rules while we are cleaning them up.
     if systemctl is-active --quiet "${ROUTEMONITOR_SERVICE}"; then
-        log "Stopping route monitor..."
+        log "Stopping route monitor transient unit: ${ROUTEMONITOR_SERVICE}"
         systemctl stop "${ROUTEMONITOR_SERVICE}" 2>/dev/null || true
+    fi
+
+    if systemctl is-failed --quiet "${ROUTEMONITOR_SERVICE}"; then
+        log "Resetting failed state: ${ROUTEMONITOR_SERVICE}"
+        systemctl reset-failed "${ROUTEMONITOR_SERVICE}" 2>/dev/null || true
     fi
 
     lock
@@ -237,10 +260,59 @@ validate_ipv4_addr() {
     fi
 }
 
+add_tap() {
+    local tap="${1:?tap required}"
+
+    # Safety: interface name length (Linux IFNAMSIZ is 16, so 15 usable chars)
+    if ((${#tap} > 15)); then
+        die "${EXIT_CONFIG_ERROR}" "Error: tap name too long (>15): $tap"
+    fi
+
+    # Ensure bridge exists
+    if ! ip link show dev "$BRIDGE_NAME" >/dev/null 2>&1; then
+        die "${EXIT_CONFIG_ERROR}" "Error: bridge does not exist: $BRIDGE_NAME"
+    fi
+
+    # If tap exists, ensure it's a tuntap/tap (avoid clobbering host interfaces)
+    if ip link show dev "$tap" >/dev/null 2>&1; then
+        if ! ip -d link show dev "$tap" 2>/dev/null | grep -qE '\b(tun|tap)\b'; then
+            die "${EXIT_CONFIG_ERROR}" "Error: interface exists but does not look like a tap/tun: $tap"
+        fi
+    else
+        # Create tap owned by aos-unit
+        ip tuntap add dev "$tap" mode tap user aos-unit group aos-unit ||
+            die "${EXIT_CONFIG_ERROR}" "Error: failed to create tap interface: $tap"
+    fi
+
+    # Bring up and attach to bridge (idempotent)
+    ip link set dev "$tap" up
+    ip link set dev "$tap" master "$BRIDGE_NAME"
+}
+
+del_tap() {
+    local tap="${1:?tap required}"
+
+    if ((${#tap} > 15)); then
+        die "${EXIT_CONFIG_ERROR}" "Error: tap name too long (>15): $tap"
+    fi
+
+    if ! ip link show dev "$tap" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if ! ip -d link show dev "$tap" 2>/dev/null | grep -qE '\b(tun|tap)\b'; then
+        die "${EXIT_CONFIG_ERROR}" "Error: refusing to delete non-tap interface: $tap"
+    fi
+
+    # Delete tap; kernel automatically handles detaching from the bridge
+    ip link del dev "$tap" 2>/dev/null || true
+}
+
 add_vm() {
     local mac="${1:?mac required}"
     local host="${2:?hostname required}"
-    local ip="${3:-}"
+    local tap="${3:?tap required}"
+    local ip="${4:-}"
 
     validate_host_name "$host"
 
@@ -284,12 +356,15 @@ add_vm() {
     if [[ -n $ip ]]; then
         update_hosts_add "$ip" "${host}"
     fi
+
+    add_tap "${tap}"
 }
 
 del_vm() {
     local mac="${1:?mac required}"
     local host="${2:?hostname required}"
-    local ip="${3:-}"
+    local tap="${3:?tap required}"
+    local ip="${4:-}"
 
     validate_host_name "$host"
 
@@ -301,6 +376,8 @@ del_vm() {
     fi
 
     lock
+
+    del_tap "${tap}"
 
     if [[ ! -f $VMS_CONF ]]; then
         log "VM registry missing; nothing to remove"

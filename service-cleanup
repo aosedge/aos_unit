@@ -20,15 +20,21 @@ source "$RUNTIME_CONFIG"
 readonly NET_LOCK="${RUNTIME_DIRECTORY}/net.lock"
 
 readonly DNSMASQ_UNIT="aos-unit-dnsmasq"
-readonlyDNSMASQ_SERVICE="${DNSMASQ_UNIT}.service"
+readonly DNSMASQ_SERVICE="${DNSMASQ_UNIT}.service"
 
 mkdir -p "$RUNTIME_DIRECTORY"
 exec 9>"$NET_LOCK"
 flock -x 9
 
-log "Stopping dnsmasq transient unit: ${DNSMASQ_SERVICE}"
-systemctl stop "$DNSMASQ_SERVICE" 2>/dev/null || true
-systemctl reset-failed "$DNSMASQ_SERVICE" 2>/dev/null || true
+if systemctl is-active --quiet "$DNSMASQ_SERVICE"; then
+    log "Stopping dnsmasq transient unit: $DNSMASQ_SERVICE"
+    systemctl stop "$DNSMASQ_SERVICE" 2>/dev/null || true
+fi
+
+if systemctl is-failed --quiet "$DNSMASQ_SERVICE"; then
+    log "Resetting failed state: $DNSMASQ_SERVICE"
+    systemctl reset-failed "$DNSMASQ_SERVICE" 2>/dev/null || true
+fi
 
 if command -v resolvectl >/dev/null 2>&1; then
     log "Reverting systemd-resolved settings for ${BRIDGE_NAME}"

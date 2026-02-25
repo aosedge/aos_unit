@@ -396,8 +396,7 @@ fi
 log "Prepared ${#NODES_TO_START[@]} node(s) for startup"
 
 cleanup_transient_unit() {
-    local unit="aos-node-${1}"
-    local svc="${unit}.service"
+    local svc="${1}.service"
 
     if systemctl show "$svc" >/dev/null 2>&1; then
         systemctl stop "$svc" 2>/dev/null || true
@@ -496,6 +495,13 @@ start_qemu_vm() {
         fi
     fi
 
+    # Generate TAP interface name from MAC addres
+    local mac_nocolon="${mac_addr//:/}"
+    local tap="aostap-${mac_nocolon: -6}"
+    if ((${#tap} > 15)); then
+        die "$EXIT_RUNTIME_ERROR" "Generated tap name too long: $tap"
+    fi
+
     local socket_path="${RUNTIME_DIRECTORY}/${node_name}.serial"
     local serial_log_path="${LOGS_DIRECTORY}/${node_name}-serial.log"
     local debug_log_path="${LOGS_DIRECTORY}/${node_name}-debug.log"
@@ -504,7 +510,8 @@ start_qemu_vm() {
     qemu_cmd+=(
         -smp "cpus=${cpu_count}"
         -m "$memory"
-        -nic "bridge,br=${BRIDGE_NAME},model=virtio-net-pci,mac=${mac_addr}"
+        -netdev "tap,id=net0,ifname=${tap},script=no,downscript=no"
+        -device "virtio-net-pci,netdev=net0,mac=${mac_addr}"
         -display none
         -vga none
         -chardev "socket,id=char0,path=${socket_path},server=on,wait=off,logfile=${serial_log_path},logappend=on"
@@ -541,44 +548,68 @@ EOF
     local systemd_mem
     systemd_mem="$(normalize_memory_for_systemd "$memory")"
 
-    local exec_start_pre="${LIBEXEC_DIR}/network-helper add-vm ${mac_addr} ${node_name}"
+    local exec_start_pre="${LIBEXEC_DIR}/network-helper add-vm ${mac_addr} ${node_name} ${tap}"
     if [[ -n $ip ]]; then
         exec_start_pre="${exec_start_pre} ${ip}"
     fi
 
-    local exec_stop_post="${LIBEXEC_DIR}/network-helper del-vm ${mac_addr} ${node_name}"
+    local exec_stop_post="${LIBEXEC_DIR}/network-helper del-vm ${mac_addr} ${node_name} ${tap}"
     if [[ -n $ip ]]; then
         exec_stop_post="${exec_stop_post} ${ip}"
     fi
 
-    cleanup_transient_unit "${node_name}"
+    cleanup_transient_unit "${unit_name}"
 
     systemd-run \
         --unit="$unit_name" \
         --description="AosEdge Unit VM: ${node_name} (${arch})" \
         --slice=aos-unit.slice \
         --property="Type=simple" \
+        --property="After=aos-unit.service" \
+        --property="BindsTo=aos-unit.service" \
         --property="User=aos-unit" \
         --property="Group=aos-unit" \
-        --property="MemoryMax=${systemd_mem}" \
-        --property="OOMPolicy=kill" \
-        --property="CPUQuota=$((cpu_count * 100))%" \
+        --property="AmbientCapabilities=CAP_NET_ADMIN" \
+        --property="CapabilityBoundingSet=CAP_NET_ADMIN" \
+        --property="RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6" \
         --property="Restart=on-failure" \
         --property="RestartSec=${HEALTH_RESTART_SEC:-5s}" \
+        --property="KillMode=control-group" \
+        --property="KillSignal=SIGTERM" \
+        --property="TimeoutStopSec=${VM_STOP_TIMEOUT:-60s}" \
+        --property="SendSIGKILL=yes" \
+        --setenv="RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" \
+        --setenv="CONFIGURATION_DIRECTORY=${CONFIGURATION_DIRECTORY}" \
+        --property="NoNewPrivileges=yes" \
+        --property="PrivateTmp=yes" \
+        --property="ProtectHome=yes" \
+        --property="ProtectSystem=strict" \
+        --property="ProtectKernelTunables=yes" \
+        --property="ProtectKernelModules=yes" \
+        --property="ProtectControlGroups=yes" \
+        --property="ProtectKernelLogs=yes" \
+        --property="LockPersonality=yes" \
+        --property="RestrictNamespaces=yes" \
+        --property="RestrictRealtime=yes" \
+        --property="SystemCallArchitectures=native" \
+        --property="ReadWritePaths=${RUNTIME_DIRECTORY}" \
+        --property="ReadWritePaths=${LOGS_DIRECTORY}" \
+        --property="ReadWritePaths=${STATE_DIRECTORY}" \
+        --property="ReadOnlyPaths=${CONFIGURATION_DIRECTORY}" \
+        --property="RestrictSUIDSGID=yes" \
+        --property="DevicePolicy=closed" \
+        --property="DeviceAllow=/dev/kvm rw" \
+        --property="DeviceAllow=/dev/vhost-net rw" \
+        --property="DeviceAllow=/dev/net/tun rw" \
         --property="StartLimitIntervalSec=${HEALTH_RESTART_WINDOW:-300}" \
         --property="StartLimitBurst=${HEALTH_MAX_RESTARTS:-3}" \
         --property="TimeoutStartSec=${VM_START_TIMEOUT:-60s}" \
-        --property="TimeoutStopSec=${VM_STOP_TIMEOUT:-60s}" \
-        --property="KillMode=mixed" \
-        --property="KillSignal=SIGTERM" \
-        --property="SendSIGKILL=yes" \
-        --property="After=aos-unit.service" \
-        --property="BindsTo=aos-unit.service" \
         --property="ExecStartPre=${exec_start_pre}" \
         --property="ExecStopPost=${exec_stop_post}" \
         --property="OnFailure=aos-unit-vm-failed@${unit_name}.service" \
-        --setenv="RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" \
-        --setenv="CONFIGURATION_DIRECTORY=${CONFIGURATION_DIRECTORY}" \
+        --property="MemoryMax=${systemd_mem}" \
+        --property="OOMPolicy=kill" \
+        --property="CPUQuota=$((cpu_count * 100))%" \
         --quiet -- \
         "${qemu_cmd[@]}"
 

@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Uplink route changes monitoring
+# Copyright (c) 2018-2026 EPAM Systems Inc.
+
+set -Eeuo pipefail
+
+LIBEXEC_DIR="$(dirname "$(realpath "$0")")"
+readonly LIBEXEC_DIR
+
+readonly DEBOUNCE_SEC=2
+
+echo "Starting AosEdge route monitor..."
+
+# Start ip monitor as a coprocess (exec to avoid subshell)
+coproc ipmon { exec /usr/sbin/ip monitor route; }
+# shellcheck disable=SC2154
+ipmon_pid="${ipmon_PID}"
+
+cleanup() {
+    echo "Shutting down monitor..."
+    kill "${ipmon_pid}" 2>/dev/null || true
+    wait "${ipmon_pid}" 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'exit 0' INT TERM
+
+pending=0
+while true; do
+    if ((pending == 1)); then
+        # Debounce: wait for quiet time after default route event
+        if IFS= read -r -t "${DEBOUNCE_SEC}" -u "${ipmon[0]}" line; then
+            # Another route event during quiet window; reset timer
+            :
+        else
+            ret=$?
+            # Start ip monitor as a coprocess (exec to avoid subshell)
+            if kill -0 "${ipmon_pid}" 2>/dev/null; then
+                # Coprocess is alive -> It was a successful timeout
+                echo "Route changes settled. Applying NAT rules..."
+                "${LIBEXEC_DIR}/network-helper" add-nat || true
+                pending=0
+            else
+                # EOF (ret=1) means ip monitor died
+                echo "Error: ip monitor stream ended unexpectedly."
+                exit 1
+            fi
+        fi
+    else
+        # Wait for default route event (blocking read)
+        if IFS= read -r -u "${ipmon[0]}" line; then
+            [[ ${line} == *"default"* ]] && pending=1
+        else
+            # Blocking read failed: could be EINTR signal OR EOF
+            if kill -0 "${ipmon_pid}" 2>/dev/null; then
+                # Coprocess is alive -> read was likely interrupted by a signal, keep looping
+                continue
+            else
+                # Coprocess is dead -> EOF
+                echo "Error: ip monitor stream ended unexpectedly."
+                exit 1
+            fi
+        fi
+    fi
+done

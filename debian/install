@@ -11,6 +11,7 @@ service-startup usr/libexec/aos-unit/
 service-cleanup usr/libexec/aos-unit/
 vm-failed-handler usr/libexec/aos-unit/
 dnsmasq-lease-hook usr/libexec/aos-unit/
+route-monitor usr/libexec/aos-unit/
 
 # Systemd units
 aos-unit.service lib/systemd/system/

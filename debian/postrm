@@ -12,11 +12,6 @@ case "$1" in
         # Remove sysctl configuration
         rm -f /etc/sysctl.d/99-aos-unit.conf
 
-        # Keep the file even if empty - user may have comments or other content
-        if [ -f /etc/qemu/bridge.conf ]; then
-            sed -i '/^allow aos-br0/d' /etc/qemu/bridge.conf
-        fi
-
         # Remove PolicyKit rule
         rm -f /etc/polkit-1/rules.d/10-aos-unit.rules
 

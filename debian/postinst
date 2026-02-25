@@ -2,8 +2,6 @@
 # debian/postinst - AOS Edge Unit post-installation script
 set -e
 
-readonly BRIDGE_CONF=/etc/qemu/bridge.conf
-
 case "$1" in
     configure)
         # Create system user if it doesn't exist
@@ -24,20 +22,6 @@ case "$1" in
         # Apply sysctl settings
         if command -v sysctl >/dev/null 2>&1; then
             sysctl -p /etc/sysctl.d/99-aos-unit.conf >/dev/null 2>&1 || true
-        fi
-
-        # Configure QEMU bridge permissions
-        # bridge.conf may already exist with other bridges - modify it safely
-        if [ ! -f "$BRIDGE_CONF" ]; then
-            install -D /dev/null "$BRIDGE_CONF"
-        fi
-        # Add our bridge if not already present
-        if ! grep -q "^allow aos-br0" "$BRIDGE_CONF" 2>/dev/null; then
-            # If file is not empty AND lacks a trailing newline, add a newline first
-            if [ -s "$BRIDGE_CONF" ] && [ "$(tail -c 1 "$BRIDGE_CONF" | wc -l)" -eq 0 ]; then
-                echo "" >>"$BRIDGE_CONF"
-            fi
-            echo "allow aos-br0" >>"$BRIDGE_CONF"
         fi
 
         # Print installation success message
