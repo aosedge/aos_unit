@@ -32,3 +32,23 @@ die() {
     error "$*"
     exit "$code"
 }
+
+ip_to_int() {
+    local IFS=.
+    local -a ipp
+    IFS=. read -r -a ipp <<<"$1"
+    echo $(((10#${ipp[0]} << 24) + (10#${ipp[1]} << 16) + (10#${ipp[2]} << 8) + 10#${ipp[3]}))
+}
+
+int_to_ip() {
+    local i="$1"
+    echo "$(((i >> 24) & 255)).$(((i >> 16) & 255)).$(((i >> 8) & 255)).$((i & 255))"
+}
+
+net_int_from_ip_mask() {
+    echo $(($1 & $2))
+}
+
+bcast_int_from_net_mask() {
+    echo $(($1 | ((~$2) & 0xFFFFFFFF)))
+}

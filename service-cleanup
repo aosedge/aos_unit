@@ -10,12 +10,8 @@ readonly LOG_TAG="aos-unit:cleanup"
 . "${LIBEXEC_DIR}/log-helper"
 
 : "${RUNTIME_DIRECTORY:?RUNTIME_DIRECTORY is undefined. Check systemd unit.}"
-: "${CONFIGURATION_DIRECTORY:?CONFIGURATION_DIRECTORY is undefined. Check systemd unit.}"
 
-readonly RUNTIME_CONFIG="${CONFIGURATION_DIRECTORY}/runtime.conf"
-source "$RUNTIME_CONFIG"
-
-: "${BRIDGE_NAME:?BRIDGE_NAME missing in $RUNTIME_CONFIG}"
+: "${BRIDGE_NAME:?BRIDGE_NAME missing in $NETWORK_CONFIG}"
 
 readonly NET_LOCK="${RUNTIME_DIRECTORY}/net.lock"
 

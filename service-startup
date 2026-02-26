@@ -10,23 +10,15 @@ readonly LOG_TAG="aos-unit:startup"
 . "${LIBEXEC_DIR}/log-helper"
 
 : "${RUNTIME_DIRECTORY:?RUNTIME_DIRECTORY is undefined. Check systemd unit.}"
-: "${CONFIGURATION_DIRECTORY:?CONFIGURATION_DIRECTORY is undefined. Check systemd unit.}"
-
-readonly RUNTIME_CONFIG="${CONFIGURATION_DIRECTORY}/runtime.conf"
-source "$RUNTIME_CONFIG"
-
-: "${BRIDGE_NAME:?BRIDGE_NAME missing in $RUNTIME_CONFIG}"
-: "${BRIDGE_IP:?BRIDGE_IP missing in $RUNTIME_CONFIG}"
-: "${DNS_DOMAIN:?DNS_DOMAIN missing in $RUNTIME_CONFIG}"
-: "${DHCP_START:?DHCP_START missing in $RUNTIME_CONFIG}"
-: "${DHCP_END:?DHCP_END missing in $RUNTIME_CONFIG}"
 
 readonly EXIT_CONFIG_ERROR=2
 readonly EXIT_RUNTIME_ERROR=1
 
 readonly NET_LOCK="${RUNTIME_DIRECTORY}/net.lock"
 
-readonly DNS_ALT_PORT="${DNS_ALT_PORT:-53}"
+readonly DHCP_CIDR="${DHCP_CIDR:-10.200.1.0/24}"
+
+readonly DNS_ALT_PORT="${DNS_ALT_PORT:-5300}"
 readonly UPSTREAM_DNS="${UPSTREAM_DNS:-127.0.0.53}"
 
 readonly DNSMASQ_UNIT="aos-unit-dnsmasq"
@@ -40,8 +32,6 @@ flock -x 9
 
 readonly HOSTS_FILE="$RUNTIME_DIRECTORY/dnsmasq.d/hosts"
 touch "${HOSTS_FILE}"
-
-readonly GW_IP="${GATEWAY_IP:-${BRIDGE_IP%/*}}"
 
 bridge_created=0
 nft_applied=0
@@ -70,15 +60,74 @@ rollback() {
 }
 trap rollback EXIT
 
+# 0) Create network configuration
+derive_network_config() {
+    local prefix="${DHCP_CIDR#*/}"
+    local host_bits=$((32 - prefix))
+    local temp_file
+
+    if ((prefix >= 31 || prefix < 8)); then
+        die "${EXIT_CONFIG_ERROR}" "Error: Prefix /${prefix} is not supported. Must be between /8 and /30."
+    fi
+
+    local ip_int
+    ip_int=$(ip_to_int "${DHCP_CIDR%/*}")
+
+    local mask_int
+    mask_int=$(((0xFFFFFFFF << host_bits) & 0xFFFFFFFF))
+
+    local net_int
+    net_int=$(net_int_from_ip_mask "$ip_int" "$mask_int")
+
+    local bcast_int
+    bcast_int=$(bcast_int_from_net_mask "$net_int" "$mask_int")
+
+    local bridge_int=$((net_int + 1))
+
+    local usable_hosts=$(((1 << host_bits) - 2))
+    local dhcp_start_int=$((bridge_int + (usable_hosts / 2)))
+    local dhcp_end_int=$((bcast_int - 1))
+
+    if ((dhcp_start_int <= bridge_int)); then
+        dhcp_start_int=$((bridge_int + 1))
+    fi
+    if ((dhcp_start_int > dhcp_end_int)); then
+        die "${EXIT_CONFIG_ERROR}" "Error: DHCP range is empty for ${DHCP_CIDR}"
+    fi
+
+    BRIDGE_IP=$(int_to_ip "$bridge_int")
+    readonly BRIDGE_IP
+    DHCP_START=$(int_to_ip "$dhcp_start_int")
+    readonly DHCP_START
+    DHCP_END=$(int_to_ip "$dhcp_end_int")
+    readonly DHCP_END
+
+    temp_file=$(mktemp "${RUNTIME_DIRECTORY}/${NETWORK_CONFIG}.XXXXXX") ||
+        die "${EXIT_RUNTIME_ERROR}" "Error: Failed to create temporary network config file"
+
+    cat >"$temp_file" <<EOF
+BRIDGE_NAME=${BRIDGE_NAME}
+BRIDGE_IP=${BRIDGE_IP}
+NETMASK=$(int_to_ip "$mask_int")
+EOF
+
+    mv "$temp_file" "${RUNTIME_DIRECTORY}/${NETWORK_CONFIG}"
+    log "Runtime network configuration written to ${NETWORK_CONFIG}"
+}
+
 # 1) Bridge (exclusive ownership)
+machine_id="$(cat /etc/machine-id)"
+readonly BRIDGE_NAME="aosbr${machine_id:0:6}"
 if ip link show "$BRIDGE_NAME" &>/dev/null; then
     die "${EXIT_RUNTIME_ERROR}" "Bridge '$BRIDGE_NAME' already exists; aos-unit requires exclusive ownership."
 fi
 
+derive_network_config # set BRIDGE_IP
+
 log "Creating bridge: $BRIDGE_NAME ($BRIDGE_IP)"
 ip link add "$BRIDGE_NAME" type bridge
 bridge_created=1
-ip addr add "$BRIDGE_IP" dev "$BRIDGE_NAME"
+ip addr add "$BRIDGE_IP/${DHCP_CIDR#*/}" dev "$BRIDGE_NAME"
 ip link set "$BRIDGE_NAME" up
 
 # 2) nft skeleton
@@ -95,8 +144,8 @@ EOF
     )
     dns_output_redirect_rules=$(
         cat <<EOF
-    ip daddr ${GW_IP} udp dport 53 dnat to ${GW_IP}:${DNS_ALT_PORT}
-    ip daddr ${GW_IP} tcp dport 53 dnat to ${GW_IP}:${DNS_ALT_PORT}
+    ip daddr ${BRIDGE_IP} udp dport 53 dnat to ${BRIDGE_IP}:${DNS_ALT_PORT}
+    ip daddr ${BRIDGE_IP} tcp dport 53 dnat to ${BRIDGE_IP}:${DNS_ALT_PORT}
 EOF
     )
 fi
@@ -151,9 +200,9 @@ except-interface=lo
 
 # DNS on bridge IP
 port=${DNS_ALT_PORT}
-listen-address=${GW_IP}
-domain=${DNS_DOMAIN}
-local=/${DNS_DOMAIN}/
+listen-address=${BRIDGE_IP}
+domain=aos-unit
+local=/aos-unit/
 expand-hosts
 
 no-resolv
@@ -165,8 +214,8 @@ dhcp-script=${LIBEXEC_DIR}/dnsmasq-lease-hook
 
 # DHCP
 dhcp-range=${DHCP_START},${DHCP_END},${DHCP_LEASE_TIME}
-dhcp-option=3,${GW_IP}
-dhcp-option=6,${GW_IP}
+dhcp-option=3,${BRIDGE_IP}
+dhcp-option=6,${BRIDGE_IP}
 dhcp-leasefile=${LEASES_FILE}
 dhcp-ignore-clid
 dhcp-ignore-names
@@ -186,7 +235,9 @@ dns_test_out=$(/usr/sbin/dnsmasq --test --conf-file="$CONF_FILE" 2>&1) || {
 log "Starting dnsmasq as transient unit: ${DNSMASQ_SERVICE}"
 systemd-run \
     --unit="$DNSMASQ_UNIT" \
-    --description="AosEdge dnsmasq (${DNS_DOMAIN}:${BRIDGE_IP})" \
+    --description="AosEdge dnsmasq @${BRIDGE_IP}" \
+    --property="EnvironmentFile=${RUNTIME_DIRECTORY}/${NETWORK_CONFIG}" \
+    --property="Environment=NETWORK_CONFIG=${NETWORK_CONFIG}" \
     --property="Type=simple" \
     --property="BindsTo=aos-unit.service" \
     --property="User=aos-unit" \
@@ -201,7 +252,6 @@ systemd-run \
     --property="TimeoutStopSec=5s" \
     --property="SendSIGKILL=yes" \
     --setenv="RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" \
-    --setenv="CONFIGURATION_DIRECTORY=${CONFIGURATION_DIRECTORY}" \
     --property="NoNewPrivileges=yes" \
     --property="PrivateTmp=yes" \
     --property="ProtectSystem=strict" \
@@ -217,7 +267,6 @@ systemd-run \
     --property="RestrictRealtime=yes" \
     --property="SystemCallArchitectures=native" \
     --property="ReadWritePaths=${RUNTIME_DIRECTORY}" \
-    --property="ReadOnlyPaths=${CONFIGURATION_DIRECTORY}" \
     --quiet -- \
     /usr/sbin/dnsmasq --keep-in-foreground --conf-file="$CONF_FILE"
 
@@ -230,16 +279,16 @@ log "dnsmasq started (systemd unit ${DNSMASQ_SERVICE})"
 
 # 4) systemd-resolved routing (required for host access to *.aos-unit)
 if ! command -v resolvectl >/dev/null 2>&1; then
-    die "${EXIT_RUNTIME_ERROR}" "resolvectl not found; host DNS routing for *.${DNS_DOMAIN} is required"
+    die "${EXIT_RUNTIME_ERROR}" "resolvectl not found; host DNS routing for *.aos-unit is required"
 fi
 
-log "Configuring systemd-resolved routing: ~${DNS_DOMAIN} via ${GW_IP} on ${BRIDGE_NAME}"
+log "Configuring systemd-resolved routing: ~aos-unit via ${BRIDGE_IP} on ${BRIDGE_NAME}"
 
-if ! resolvectl dns "$BRIDGE_NAME" "$GW_IP"; then
+if ! resolvectl dns "$BRIDGE_NAME" "$BRIDGE_IP"; then
     die "${EXIT_RUNTIME_ERROR}" "Failed to configure systemd-resolved DNS on ${BRIDGE_NAME} (polkit rule required)"
 fi
 
-if ! resolvectl domain "$BRIDGE_NAME" "~${DNS_DOMAIN}"; then
+if ! resolvectl domain "$BRIDGE_NAME" "~aos-unit"; then
     die "${EXIT_RUNTIME_ERROR}" "Failed to configure systemd-resolved domain routing on ${BRIDGE_NAME} (polkit rule required)"
 fi
 

@@ -4,20 +4,6 @@ set -e
 
 case "$1" in
     purge)
-        # Remove configuration files
-        rm -f /etc/aos-unit/runtime.conf
-        rm -f /etc/aos-unit/unit_config.yaml
-        rmdir /etc/aos-unit 2>/dev/null || true
-
-        # Remove sysctl configuration
-        rm -f /etc/sysctl.d/99-aos-unit.conf
-
-        # Remove PolicyKit rule
-        rm -f /etc/polkit-1/rules.d/10-aos-unit.rules
-
-        # Remove logrotate configuration
-        rm -f /etc/logrotate.d/aos-unit
-
         # Remove system user
         if getent passwd aos-unit >/dev/null 2>&1; then
             deluser --system aos-unit >/dev/null 2>&1 || true

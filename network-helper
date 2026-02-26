@@ -10,13 +10,8 @@ readonly LOG_TAG="aos-unit:network-helper"
 . "${LIBEXEC_DIR}/log-helper"
 
 : "${RUNTIME_DIRECTORY:?RUNTIME_DIRECTORY is undefined. Check systemd unit.}"
-: "${CONFIGURATION_DIRECTORY:?CONFIGURATION_DIRECTORY is undefined. Check systemd unit.}"
 
-readonly RUNTIME_CONFIG="${CONFIGURATION_DIRECTORY}/runtime.conf"
-source "$RUNTIME_CONFIG"
-
-: "${BRIDGE_NAME:?BRIDGE_NAME missing in $RUNTIME_CONFIG}"
-: "${DNS_DOMAIN:?DNS_DOMAIN missing in $RUNTIME_CONFIG}"
+: "${BRIDGE_NAME:?BRIDGE_NAME missing in $NETWORK_CONFIG}"
 
 readonly EXIT_RUNTIME_ERROR=1
 readonly EXIT_CONFIG_ERROR=2
@@ -113,6 +108,8 @@ EOF
         systemd-run \
             --unit="${ROUTEMONITOR_SERVICE}" \
             --description="AosEdge Route Monitor (Uplink: ${uplink:-None})" \
+            --property="EnvironmentFile=${RUNTIME_DIRECTORY}/${NETWORK_CONFIG}" \
+            --property="Environment=NETWORK_CONFIG=${NETWORK_CONFIG}" \
             --property="Type=simple" \
             --property="BindsTo=aos-unit.service" \
             --property="User=aos-unit" \
@@ -127,7 +124,6 @@ EOF
             --property="TimeoutStopSec=5s" \
             --property="SendSIGKILL=yes" \
             --setenv="RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" \
-            --setenv="CONFIGURATION_DIRECTORY=${CONFIGURATION_DIRECTORY}" \
             --property="NoNewPrivileges=yes" \
             --property="PrivateTmp=yes" \
             --property="ProtectSystem=strict" \
@@ -143,7 +139,6 @@ EOF
             --property="RestrictRealtime=yes" \
             --property="SystemCallArchitectures=native" \
             --property="ReadWritePaths=${RUNTIME_DIRECTORY}" \
-            --property="ReadOnlyPaths=${CONFIGURATION_DIRECTORY}" \
             --quiet -- \
             "${LIBEXEC_DIR}/route-monitor"
     fi
@@ -180,7 +175,7 @@ EOF
 update_hosts_add() {
     local ip_addr="$1"
     local host="$2"
-    local fqdn="${host}.${DNS_DOMAIN}"
+    local fqdn="${host}.aos-unit"
     local tmp="${HOSTS_FILE}.tmp"
 
     awk -v ip="$ip_addr" -v h="$host" -v f="$fqdn" '
@@ -200,7 +195,7 @@ update_hosts_add() {
 
 update_hosts_del() {
     local host="$1"
-    local fqdn="${host}.${DNS_DOMAIN}"
+    local fqdn="${host}.aos-unit"
     local tmp="${HOSTS_FILE}.tmp"
 
     awk -v h="$host" -v f="$fqdn" '

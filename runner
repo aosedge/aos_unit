@@ -15,11 +15,9 @@ readonly LOG_TAG="aos-unit:runner"
 : "${LOGS_DIRECTORY:?LOGS_DIRECTORY is undefined. Check systemd unit.}"
 : "${CONFIGURATION_DIRECTORY:?CONFIGURATION_DIRECTORY is undefined. Check systemd unit.}"
 
-readonly RUNTIME_CONFIG="${CONFIGURATION_DIRECTORY}/runtime.conf"
-source "$RUNTIME_CONFIG"
-
-: "${BRIDGE_NAME:?BRIDGE_NAME missing in $RUNTIME_CONFIG}"
-: "${BRIDGE_IP:?BRIDGE_IP missing in $RUNTIME_CONFIG}"
+: "${BRIDGE_NAME:?BRIDGE_NAME missing in $NETWORK_CONFIG}"
+: "${BRIDGE_IP:?BRIDGE_IP missing in $NETWORK_CONFIG}"
+: "${NETMASK:?NETMASK missing in $NETWORK_CONFIG}"
 
 readonly EXIT_CONFIG_ERROR=2
 readonly EXIT_RUNTIME_ERROR=1
@@ -260,6 +258,7 @@ map_oci_to_qemu_arch() {
 }
 
 declare -a NODES_TO_START=()
+declare -A allocated_ips
 
 log "Preparing nodes from configuration..."
 
@@ -320,13 +319,30 @@ for node_spec in "${NODE_SPECS[@]}"; do
     fi
 
     if [[ -n $custom_ip ]]; then
-        bridge_prefix="${BRIDGE_IP%/*}"
-        bridge_prefix="${bridge_prefix%.*}"
-        ip_test_prefix="${custom_ip%.*}"
+        # Convert to int for strict mathematical validation
+        ip_int=$(ip_to_int "$custom_ip")
+        mask_int=$(ip_to_int "$NETMASK")
+        bridge_int=$(ip_to_int "$BRIDGE_IP")
+        net_int=$(net_int_from_ip_mask "$bridge_int" "$mask_int")
+        bcast_int=$(bcast_int_from_net_mask "$net_int" "$mask_int")
+        bridge_int=$((net_int + 1))
 
-        if [[ $ip_test_prefix != "$bridge_prefix" ]]; then
-            die "$EXIT_CONFIG_ERROR" "Custom IP $custom_ip not in bridge subnet ${BRIDGE_IP} (for node: $name)"
+        if (((ip_int & mask_int) != net_int)); then
+            die "$EXIT_CONFIG_ERROR" "Custom IP $custom_ip for node '$name' is outside the subnet"
         fi
+        if ((ip_int == net_int)); then
+            die "$EXIT_CONFIG_ERROR" "Custom IP $custom_ip for node '$name' conflicts with network address"
+        fi
+        if ((ip_int == bcast_int)); then
+            die "$EXIT_CONFIG_ERROR" "Custom IP $custom_ip for node '$name' conflicts with broadcast address"
+        fi
+        if ((ip_int == bridge_int)); then
+            die "$EXIT_CONFIG_ERROR" "Custom IP $custom_ip for node '$name' conflicts with AosEdge bridge ($BRIDGE_IP)"
+        fi
+        if [[ -n ${allocated_ips[$custom_ip]:-} ]]; then
+            die "$EXIT_CONFIG_ERROR" "Duplicate static IP $custom_ip detected (assigned to multiple nodes)"
+        fi
+        allocated_ips[$custom_ip]=1
 
         ip="$custom_ip"
         log "    IP: $ip (static via DHCP reservation)"
@@ -357,7 +373,7 @@ for node_spec in "${NODE_SPECS[@]}"; do
         log "    CPU type: $cpu_type (default)"
     fi
 
-    if [[ ${ENABLE_KVM:-false} == "false" ]]; then
+    if [[ ${ENABLE_KVM:-true} == "false" ]]; then
         use_kvm="false"
         log "    KVM: is not enabled (ENABLE_KVM is undefined or set to 'false')"
     elif check_kvm_available "$arch"; then
@@ -497,7 +513,7 @@ start_qemu_vm() {
 
     # Generate TAP interface name from MAC addres
     local mac_nocolon="${mac_addr//:/}"
-    local tap="aostap-${mac_nocolon: -6}"
+    local tap="aostap${mac_nocolon: -6}"
     if ((${#tap} > 15)); then
         die "$EXIT_RUNTIME_ERROR" "Generated tap name too long: $tap"
     fi
@@ -563,6 +579,8 @@ EOF
     systemd-run \
         --unit="$unit_name" \
         --description="AosEdge Unit VM: ${node_name} (${arch})" \
+        --property="EnvironmentFile=${RUNTIME_DIRECTORY}/${NETWORK_CONFIG}" \
+        --property="Environment=NETWORK_CONFIG=${NETWORK_CONFIG}" \
         --slice=aos-unit.slice \
         --property="Type=simple" \
         --property="After=aos-unit.service" \
@@ -579,7 +597,6 @@ EOF
         --property="TimeoutStopSec=${VM_STOP_TIMEOUT:-60s}" \
         --property="SendSIGKILL=yes" \
         --setenv="RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" \
-        --setenv="CONFIGURATION_DIRECTORY=${CONFIGURATION_DIRECTORY}" \
         --property="NoNewPrivileges=yes" \
         --property="PrivateTmp=yes" \
         --property="ProtectHome=yes" \
@@ -595,7 +612,6 @@ EOF
         --property="ReadWritePaths=${RUNTIME_DIRECTORY}" \
         --property="ReadWritePaths=${LOGS_DIRECTORY}" \
         --property="ReadWritePaths=${STATE_DIRECTORY}" \
-        --property="ReadOnlyPaths=${CONFIGURATION_DIRECTORY}" \
         --property="RestrictSUIDSGID=yes" \
         --property="DevicePolicy=closed" \
         --property="DeviceAllow=/dev/kvm rw" \

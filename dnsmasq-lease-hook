@@ -8,7 +8,6 @@ LIBEXEC_DIR="$(dirname "$(realpath "$0")")"
 readonly LIBEXEC_DIR
 
 : "${RUNTIME_DIRECTORY:?RUNTIME_DIRECTORY undefined}"
-: "${CONFIGURATION_DIRECTORY:?CONFIGURATION_DIRECTORY undefined}"
 
 action="${1:?action required}"
 mac="${2:-}"
