@@ -1,14 +1,17 @@
-.TH AOS-UNIT.CONF 5 "2026-02-22" "AosEdge Unit 1.0" "File Formats"
+.TH AOS-UNIT.CONF 5 "2026-02-26" "AosEdge Unit 1.0" "File Formats"
 .SH NAME
 aos-unit.conf \- Configuration files for AosEdge Unit VM management
 .SH SYNOPSIS
 .I /etc/aos-unit/unit_config.yaml
 .br
 .I /etc/aos-unit/runtime.conf
+.br
+.I /run/aos-unit/network.conf
+(runtime-generated)
 
 .SH DESCRIPTION
 .B aos-unit
-uses two configuration files to define VM behavior and infrastructure settings.
+uses two primary configuration files to define VM behavior and infrastructure settings, plus a runtime-generated network configuration file.
 
 .SH UNIT_CONFIG.YAML
 .SS Overview
@@ -21,12 +24,12 @@ unit:
     \- name: main
       cpu: 4
       mem: 8G
-      ip: 10.0.0.100      # Optional
-      arch: amd64         # Optional
+      ip: 10.200.1.100  # Optional
+      arch: amd64       # Optional
       image: custom.qcow2 # Optional
-      machine_type: q35   # Optional
-      cpu_type: max       # Optional
-      uefi: true          # Optional
+      machine_type: q35 # Optional
+      cpu_type: max     # Optional
+      uefi: true        # Optional
 .fi
 
 .SS Parameters
@@ -62,13 +65,13 @@ Examples: 4G, 8192M, 16G
 .B ip
 (Optional) Static IP address for DHCP reservation.
 .br
-Must be within the same /24 bridge subnet (default: 10.0.0.0/24).
+Must be within the automatically-derived bridge subnet (default: 10.200.1.0/24, configurable via DHCP_CIDR).
 .br
-If omitted, dnsmasq assigns IP from pool (10.0.0.100-254).
+If omitted, dnsmasq assigns IP from the automatically-calculated DHCP pool (second half of subnet).
 .br
 Both static and dynamic VMs are accessible via hostname.
 .br
-Example: 10.0.0.200
+Example: 10.200.1.100
 
 .TP
 .B arch
@@ -166,55 +169,58 @@ Images must be owned by the \fIaos-unit\fR user to allow QEMU read/write access.
 
 .SH RUNTIME.CONF
 .SS Overview
-Infrastructure, networking, and runtime configuration settings loaded by the runner and network helper scripts.
+Infrastructure, networking, and runtime configuration settings loaded by the orchestrator and network helper scripts. This file contains a minimal set of parameters; most network configuration is automatically derived at runtime.
 
 .SS Format
 .nf
-# Bridge name for VM networking
-BRIDGE_NAME="aos-br0"
+# DHCP subnet CIDR (network configuration auto-derived from this)
+DHCP_CIDR="10.200.1.0/24"
 
-# Bridge IP address and netmask (CIDR notation)
-BRIDGE_IP="10.0.0.1/24"
-
-# DNS domain for VMs
-DNS_DOMAIN="aos-unit"
-
-# DNS alternative port for dnsmasq
+# DNS alternative port for dnsmasq sidecar
 DNS_ALT_PORT="5300"
+
+# Upstream DNS server for internet resolution
 UPSTREAM_DNS="127.0.0.53"
 
-# DHCP range for VM IP assignment
-DHCP_START="10.0.0.100"
-DHCP_END="10.0.0.254"
-
-# Internet-facing interface
+# Internet-facing interface (empty = auto-detect)
 INTERNET_INTERFACE=""
 
-# Enable KVM
+# Enable KVM hardware acceleration
 ENABLE_KVM="true"
 .fi
 
 .SS Parameters
 .TP
-.B BRIDGE_NAME
-Network bridge name. Must be listed in \fI/etc/qemu/bridge.conf\fR to allow QEMU to attach to it.
-
-.TP
-.B BRIDGE_IP
-Bridge IP address and subnet. Acts as the Gateway IP for the VMs. Consider using alternative subnets (e.g., 10.200.1.1/24) if your host environment conflicts with common LANs.
+.B DHCP_CIDR
+Network CIDR for the VM subnet. All network parameters (bridge IP, DHCP range, netmask) are automatically calculated from this single value at service startup.
 .IP
-\fBSupported prefix length:\fR /24 only. The VM bridge network is supported only as a single /24 IPv4 subnet. Static node IP validation assumes /24 semantics (first three octets match). Using other prefix lengths may cause valid addresses to be rejected.
+The bridge IP is assigned as the first usable host address (.1 in the subnet). The DHCP pool starts at the midpoint of usable addresses and extends to the broadcast address minus one.
+.IP
+\fBSupported prefix length:\fR /8 to /30. Most common deployments use /24 (254 usable hosts). Smaller subnets (/25-/30) are supported but provide fewer DHCP addresses. Very large subnets (/8-/23) work but may be impractical for edge deployments.
 .IP
 Example:
-.BR "BRIDGE_IP=10.10.0.1/24"
-
-.TP
-.B DNS_DOMAIN
-DNS domain suffix for VMs. VMs are accessible as: name.domain.
+.RS
+.br
+DHCP_CIDR="10.200.1.0/24"
+.br
+Results in:
+.br
+  Bridge IP: 10.200.1.1
+.br
+  Netmask: 255.255.255.0
+.br
+  DHCP Range: 10.200.1.127 to 10.200.1.254
+.RE
+.IP
+Consider using alternative subnets (e.g., 10.200.1.0/24) if your host environment conflicts with common private networks (192.168.x.0/24, 10.0.0.0/8).
 
 .TP
 .B DNS_ALT_PORT
-Port for dnsmasq DNS server (sidecar strategy). Uses a non-standard port to avoid conflicts with systemd-resolved on the host. nftables transparently redirects VM DNS queries.
+Port for the dnsmasq DNS server (sidecar strategy). Uses a non-standard port to avoid conflicts with systemd-resolved on the host. nftables transparently redirects VM DNS queries from port 53 to this alternate port.
+.IP
+Default: 5300
+.br
+Note: Do not use port 53, as it will conflict with systemd-resolved.
 
 .TP
 .B UPSTREAM_DNS
@@ -222,21 +228,75 @@ Upstream DNS server for internet resolution.
 .IP
 Usually, this configuration assumes
 .BR systemd-resolved (8)
-is enabled and provides the local stub resolver. If
+is enabled and provides the local stub resolver at 127.0.0.53. If
 .BR systemd-resolved (8)
-is not running, set this to a reachable upstream DNS resolver address.
-
-.TP
-.B DHCP_START / DHCP_END
-Range of the DHCP IP pool for dynamic allocations. Must be within the bridge subnet.
+is not running, set this to a reachable upstream DNS resolver address (e.g., 8.8.8.8, 1.1.1.1).
+.IP
+Default: 127.0.0.53
 
 .TP
 .B INTERNET_INTERFACE
-Network interface for NAT masquerading to the internet. Empty means auto-detect. Specify manually only if auto-detection fails.
+Network interface for NAT masquerading to the internet. Empty means auto-detect via default route. Specify manually only if auto-detection fails or you need to force a specific interface.
+.IP
+Examples: eth0, wlan0, enp0s3
+.br
+Default: (empty, auto-detect)
 
 .TP
 .B ENABLE_KVM
-(Optional) Enables QEMU hardware acceleration. If true, the runner verifies host support and access to \fI/dev/kvm\fR. If false, forces software emulation (TCG). (Default: false)
+(Optional) Enables QEMU hardware acceleration. If true, the runner verifies host support and access to \fI/dev/kvm\fR. If false, forces software emulation (TCG).
+.IP
+Default: false
+
+.SH NETWORK.CONF (Runtime-Generated)
+.SS Overview
+This file is automatically generated by the \fBservice-startup\fR script at service initialization and placed in \fI/run/aos-unit/network.conf\fR. It contains the derived network configuration calculated from \fBDHCP_CIDR\fR and the host's machine-id.
+
+.SS Generated Parameters
+.TP
+.B BRIDGE_NAME
+The deterministic bridge name derived from the host's machine-id: \fBaosbr{machine-id:0:6}\fR.
+.br
+Example: aosbr3f8a2c (first 6 characters of /etc/machine-id)
+
+.TP
+.B BRIDGE_IP
+The bridge IP address (first usable host in the subnet).
+.br
+Calculated as: network_address + 1
+.br
+Example: 10.200.1.1 (for DHCP_CIDR=10.200.1.0/24)
+
+.TP
+.B NETMASK
+The subnet netmask in dotted-decimal notation.
+.br
+Calculated from the CIDR prefix length.
+.br
+Example: 255.255.255.0 (for /24)
+
+.SS Availability
+This file is created during \fBExecStartPre\fR (service-startup phase) and is available to all subsequent orchestrator components via systemd's \fBEnvironmentFile\fR directive. It is automatically removed when the service stops.
+
+.SS Manual Inspection
+To view the current runtime network configuration:
+.nf
+cat /run/aos-unit/network.conf
+.fi
+
+.SH NOTES
+.IP \(bu 3
+The bridge name is no longer user-configurable. It is automatically derived from the host's machine-id to ensure determinism without conflicts.
+.IP \(bu
+The DNS domain is hardcoded to \fBaos-unit\fR. VMs are always accessible as \fIname.aos-unit\fR from the host.
+.IP \(bu
+Network parameters (bridge IP, DHCP range, netmask) are automatically calculated. Manual specification is no longer required or supported.
+.IP \(bu
+Host-side DNS routing for the VM domain is configured via
+.BR resolvectl (1)
+and therefore requires
+.BR systemd-resolved (8)
+and D-Bus access (the package installs a Polkit rule for this integration).
 
 .SH YAML PARSER LIMITATIONS
 To maintain a minimal footprint without external dependencies, \fBaos-unit\fR uses a lightweight, custom AWK-based YAML parser. It supports only a strict subset of YAML formatting:
@@ -257,19 +317,13 @@ Inline comments (\fB#\fR) are supported but must be preceded by whitespace or be
 .B Unsupported Features:
 Advanced YAML features such as anchors, aliases, multi-line string blocks (> or |), and complex nested dictionaries are \fBNOT\fR supported.
 
-.SH NOTES
-Host-side DNS routing for the VM domain is configured via
-.BR resolvectl (1)
-and therefore requires
-.BR systemd-resolved (8)
-and D-Bus access (the package installs a Polkit rule for this integration).
-
 .SH SEE ALSO
 .BR aos-unit (8),
 .BR systemctl (1),
 .BR dnsmasq (8),
 .BR nft (8),
-.BR qemu (1)
+.BR qemu (1),
+.BR resolvectl (1)
 
 .SH AUTHOR
 AosEdge Team <support@aosedge.tech>

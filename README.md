@@ -13,8 +13,8 @@ AosEdge Unit is a systemd-integrated VM management system that orchestrates mult
 ### Key Features
 
 - **Automated VM Orchestration** – Seamlessly launch and manage a fleet of AosCore emulation VMs from a single YAML-based configuration.  
-- **Production-Oriented Design** – Features structured logging (journald \+ file-based logs), explicit startup/cleanup phases, and deterministic exit codes to distinguish between configuration errors and runtime failures.  
-- **Minimal Runtime Dependencies** – Built as a lightweight Bash \+ Gawk engine. It avoids heavy runtimes like Python, Go, or NodeJS, relying instead on standard system utilities (qemu, nftables, iproute2).
+- **Production-Oriented Design** – Features structured logging (journald + file-based logs), explicit startup/cleanup phases, and deterministic exit codes to distinguish between configuration errors and runtime failures.  
+- **Minimal Runtime Dependencies** – Built as a lightweight Bash + Gawk engine. It avoids heavy runtimes like Python, Go, or NodeJS, relying instead on standard system utilities (qemu, nftables, iproute2).
 
 ## Quick Start
 
@@ -26,20 +26,21 @@ For complete configuration syntax, refer to the manual pages: man aos-unit.conf(
    `sudo apt install aos-unit`  
 2. **Prepare VM Images:** Download AosEdge unit images and place them in the system-managed state directory.  
   Download from official AosCore VM release (v5.2.2)  
-  `wget https://github.com/aosedge/meta-aos-vm/releases/download/v5.2.2/aos-vm-image-qemux86-64-5.2.2.tar.xz`  
+   `wget https://github.com/aosedge/meta-aos-vm/releases/download/v5.2.2/aos-vm-image-qemux86-64-5.2.2.tar.xz`  
   Extract the archive  
-  `tar -xf aos-vm-image-qemux86-64-5.2.2.tar.xz`  
+   `tar -xf aos-vm-image-qemux86-64-5.2.2.tar.xz`  
   Install to system state directory  
-  `sudo cp aos-vm-main-qemux86-64.qcow2 aos-vm-secondary-qemux86-64.qcow2 /var/lib/aos-unit/`  
-  `sudo chown aos-unit:aos-unit /var/lib/aos-unit/*.qcow2`  
-3. **Check Configured Nodes:** Take a look at `/etc/aos-unit/unit_config.yaml` to check the supplied sample cluster layout. It defines 2 nodes that will run on `aos-vm-main-qemux86-64.qcow2` and `aos-vm-secondary-qemux86-64.qcow2` images you have just downloaded. Network is configured with static IP to the __main__ node and dynamic IP to the __secondary__ node; both IPs are from the DHCP subnet defined in `/etc/aos-unit/runtime.conf`. For quick start - do not change any configuration, it will work out of the box!  
+   `sudo cp aos-vm-main-qemux86-64.qcow2 aos-vm-secondary-qemux86-64.qcow2 /var/lib/aos-unit/`  
+   `sudo chown aos-unit:aos-unit /var/lib/aos-unit/*.qcow2`  
+3. **Check Configured Nodes:** Take a look at `/etc/aos-unit/unit_config.yaml` to check the supplied sample cluster layout. It defines 2 nodes that will run on `aos-vm-main-qemux86-64.qcow2` and `aos-vm-secondary-qemux86-64.qcow2` images you have just downloaded. Network is configured with static IP to the __main__ node and dynamic IP to the __secondary__ node; both IPs are from the DHCP subnet automatically derived from the default CIDR (10.200.1.0/24). For quick start - do not change any configuration, it will work out of the box!  
 4. **Launch the Unit:**  
    `sudo systemctl start aos-unit`  
-5. **Access Your Nodes:** Thanks to the DNS Sidecar, VMs are immediately accessible by their YAML names wuth SSH (use `Password1`).  
+5. **Access Your Nodes:** Thanks to the DNS Sidecar, VMs are immediately accessible by their YAML names with SSH (use `Password1`).  
    `ssh root@main.aos-unit`  
    `ssh root@secondary.aos-unit`  
 
-Congratulations! You have successfully deployed your virtual AosEdge Unit. Now you need to provision it and it will be ready tor run your edge services!  
+Congratulations! You have successfully deployed your virtual AosEdge Unit. Now you need to provision it and it will be ready to run your edge services!  
+
 ## Architecture & Core Principles
 
 The architecture favors determinism, explicit failure semantics, and controlled recovery over opaque background behavior.
@@ -74,21 +75,25 @@ systemd (host)
 ├── aos-unit-dnsmasq.service             # Transient unit (DHCP + DNS on alt port)
 │   └── dnsmasq-lease-hook               # DHCP lease event hook
 │
-├── vm-failed-handler@<name>.service     # Triggered on aos-node-<name> failure
-│   └── (actions) log / collect state    # Appends forensic data to persistent logs
+├── aos-unit-route-monitor.service       # Transient unit (dynamic NAT updates)
+│   └── route-monitor                    # Debounced netlink route monitor
+│
+├── aos-unit-vm-failed@<name>.service    # Triggered on VM node <name> failure
+│   └── vm-failed-handler                # Appends forensic data to persistent logs
 │
 └── aos-unit.slice                       # VM-only resource hierarchy
     ├── aos-node-main.service            # Transient VM unit
-    │   └── qemu-system-* # QEMU process (KVM or TCG)
+    │   └── qemu-system-*                # QEMU process (KVM or TCG)
     └── aos-node-secondary.service       # Transient VM unit
 ```
 
 ## **Dynamic Networking & "Smart NAT"**
 
-Networking is not static. The host’s default route may change (e.g., Ethernet ↔ Wi-Fi). AosEdge Unit implements an adaptive, kernel-aware "Smart NAT" system to handle this seamlessly.
+Networking is not static. The host's default route may change (e.g., Ethernet ↔ Wi-Fi). AosEdge Unit implements an adaptive, kernel-aware "Smart NAT" system to handle this seamlessly.
 
-* **Atomic Handover:** A background monitor listens for kernel routing events (e.g., RTM\_NEWROUTE) via netlink.When the default route changes, NAT rules are dynamically recalculated, and nftables mappings are updated to preserve VM outbound connectivity.  
-* **Network model:** The service creates and owns a dedicated Linux bridge and assumes a single /24 IPv4 subnet for the VM network.
+* **Atomic Handover:** A background monitor (`route-monitor`) listens for kernel routing events (e.g., RTM_NEWROUTE) via netlink. When the default route changes, NAT rules are dynamically recalculated with debouncing (waits for changes to settle), and nftables mappings are updated to preserve VM outbound connectivity.  
+* **Deterministic Bridge Naming:** The virtual bridge name is automatically derived from the host's machine-id (`aosbr{machine-id:0:6}`) to ensure uniqueness without conflicts while remaining deterministic across reboots.
+* **Automatic Network Derivation:** Network configuration (bridge IP, DHCP range, netmask) is automatically calculated from a single CIDR parameter (default: 10.200.1.0/24), eliminating manual subnet management and reducing configuration errors.
 * **Host DNS integration:** Host-side resolution of VM names relies on systemd-resolved (resolvectl) being available and running.
 * **DNS Sidecar Architecture:** To avoid conflicts with systemd-resolved, the internal dnsmasq server binds to an alternate port (default 5300). Local nftables rules transparently redirect VM bridge traffic from port 53 to 5300. 
 * **Deterministic Networking:** Integrated DHCP supports both static reservations and dynamic pools. MAC addresses are hashed from node names to ensure persistent network identities.
@@ -112,30 +117,32 @@ AosEdge Unit deliberately separates VM-level failures from orchestrator-level fa
 * **Live Serial Console:** Connect to the live virtual UART without interrupting persistent logging:  
   `sudo socat -,raw,echo=0,escape=0x1d UNIX-CONNECT:/run/aos-unit/main.serial`
 * **DNS Resolution Issues:**
-  * **Host-to-VM:** Check if the host correctly routes the `~aos-unit` domain to the bridge: run `resolvectl status aos-br0`.
+  * **Host-to-VM:** Check if the host correctly routes the `~aos-unit` domain to the bridge: run `resolvectl status` and look for the dynamically-named bridge.
   * **NFTables Redirect:** Verify the `nftables` rules are successfully catching traffic on port 53 and redirecting it to the `dnsmasq` sidecar: run `sudo nft list chain inet aos_unit prerouting`.
 * **DHCP & IP Assignment:**
-  * If a VM has no IP address, verify the active DHCP leases managed by the sidecar : run `cat /run/aos-unit/dnsmasq.leases`.
+  * If a VM has no IP address, verify the active DHCP leases managed by the sidecar: run `cat /run/aos-unit/dnsmasq.leases`.
   * Inspect the sidecar logs for DHCP handshake errors: run `journalctl -u aos-unit-dnsmasq | grep DHCP`.
 * **NAT & Internet Access:**
   * If a VM cannot reach the internet, verify the host's default route is correctly detected: run `ip route show default`.
   * Ensure the `Smart NAT` masquerade and forward rules are actively applied: run `sudo nft list chain inet aos_unit postrouting` and `sudo nft list chain inet aos_unit forward`.
+* **Bridge Discovery:**
+  * To find the automatically-created bridge name: run `ip link show | grep aosbr` or check the runtime config at `/run/aos-unit/network.conf`.
 
 ## **Build & Release System**
 
-AosEdge Unit supports two distinct build modes driven by a strict "Git tag \= release source of truth" philosophy.
+AosEdge Unit supports two distinct build modes driven by a strict "Git tag = release source of truth" philosophy.
 
 | Aspect | Local Build | PPA Build |
 | :---- | :---- | :---- |
 | **Purpose** | Development / testing | Public distribution |
 | **Signing** | No source upload signing | GPG-signed source upload (required by Launchpad) |
-| **Version Scheme** | Build info-based {base}+git{short\_sha}+{timestamp} | Tag-based {base}\~{series} |
+| **Version Scheme** | Build info-based {base}+git{short_sha}+{timestamp} | Tag-based {base}~{series} |
 | **Changelog** | Generated automatically | Extracted from git tag (mandatory) |
 | **Output** | Binary .deb | Signed source package (.dsc, .changes, tarballs) |
 
 ### **PPA CI Integration (GitHub Actions)**
 
-Releases are heavily guarded. The CI workflow (ppa-publish.yml) triggers on versioned tags (v\*.\*.\*). It strictly verifies the GPG signature of the tag against an allowed list of public keys (TAG\_SIGNING\_PUBKEYS) before importing the Launchpad signing key to build and upload the source packages. This completely prevents unauthorized releases from entering the PPA. For more information check out [release documentation](RELEASE.md).
+Releases are heavily guarded. The CI workflow (ppa-publish.yml) triggers on versioned tags (v\*.\*.\*). It strictly verifies the GPG signature of the tag against an allowed list of public keys (TAG_SIGNING_PUBKEYS) before importing the Launchpad signing key to build and upload the source packages. This completely prevents unauthorized releases from entering the PPA. For more information check out [release documentation](RELEASE.md).
 
 ## **Documentation & Built-in Help**
 
