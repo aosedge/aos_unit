@@ -18,27 +18,45 @@ AosEdge Unit is a systemd-integrated VM management system that orchestrates mult
 
 ## Quick Start
 
-For complete configuration syntax, refer to the manual pages: man aos-unit.conf(5) and man aos-unit(8).
+For complete configuration syntax, refer to the manual pages: **man aos-unit.conf(5)** and **man aos-unit(8)**.
 
-1. **Install the Package:**  
-   `sudo add-apt-repository ppa:aosedge/aos-unit`  
-   `sudo apt update`  
-   `sudo apt install aos-unit`  
-2. **Prepare VM Images:** Download AosEdge unit images and place them in the system-managed state directory.  
-  Download from official AosCore VM release (v5.2.2)  
-   `wget https://github.com/aosedge/meta-aos-vm/releases/download/v5.2.2/aos-vm-image-qemux86-64-5.2.2.tar.xz`  
-  Extract the archive  
-   `tar -xf aos-vm-image-qemux86-64-5.2.2.tar.xz`  
-  Install to system state directory  
-   `sudo cp aos-vm-main-qemux86-64.qcow2 aos-vm-secondary-qemux86-64.qcow2 /var/lib/aos-unit/`  
-   `sudo chown aos-unit:aos-unit /var/lib/aos-unit/*.qcow2`  
-3. **Check Configured Nodes:** Take a look at `/etc/aos-unit/unit_config.yaml` to check the supplied sample cluster layout. It defines 2 nodes that will run on `aos-vm-main-qemux86-64.qcow2` and `aos-vm-secondary-qemux86-64.qcow2` images you have just downloaded. Network is configured with static IP to the __main__ node and dynamic IP to the __secondary__ node; both IPs are from the DHCP subnet automatically derived from the default CIDR (10.200.1.0/24). For quick start - do not change any configuration, it will work out of the box!  
-4. **Launch the Unit:**  
-   `sudo systemctl start aos-unit`  
-5. **Access Your Nodes:** Thanks to the DNS Sidecar, VMs are immediately accessible by their YAML names with SSH (use `Password1`).  
-   `ssh root@main.aos-unit`  
-   `ssh root@secondary.aos-unit`  
+1. **Install the Package:**
 
+   ```
+   sudo add-apt-repository ppa:aosedge/aos-unit
+   sudo apt update
+   sudo apt install aos-unit
+   ```
+3. **Prepare VM Images:** Get AosEdge unit images and place them in the system-managed state directory.  
+     Download from official AosCore VM release (v5.2.2)
+   ```
+   wget https://github.com/aosedge/meta-aos-vm/releases/download/v5.2.2/aos-vm-image-qemux86-64-5.2.2.tar.xz
+   ```
+     Extract the archive
+   ```
+   tar -xf aos-vm-image-qemux86-64-5.2.2.tar.xz
+   ```
+     Install to system state directory
+   ```
+   sudo cp aos-vm-main-qemux86-64.qcow2 aos-vm-secondary-qemux86-64.qcow2 /var/lib/aos-unit/
+   sudo chown aos-unit:aos-unit /var/lib/aos-unit/*.qcow2
+   ```
+5. **Check Configured Nodes:** Take a look at `/etc/aos-unit/unit_config.yaml` to check the supplied sample cluster layout. It defines 2 nodes that will run on `aos-vm-main-qemux86-64.qcow2` and `aos-vm-secondary-qemux86-64.qcow2` images you have just downloaded. Network is configured with static IP to the __main__ node and dynamic IP to the __secondary__ node. Note that static IP forthe main node is 10.0.0.100 - so let's configure system's DHCP pool to match it. Add `DHCP_CIDR=10.0.0.0/24` to `/etc/aos-unit/runtime.conf` using some `sed` regexp magic:
+   ```
+   sudo sed -i 's|^#\s*DHCP_CIDR=.*|DHCP_CIDR="10.0.0.0/24"|' /etc/aos-unit/runtime.conf
+   ```
+6. **Launch the Unit:**
+   ```
+   sudo systemctl start aos-unit
+   ```
+7. **Access Your Nodes:** Thanks to the DNS Sidecar, VMs are immediately accessible by their YAML names with SSH (use `Password1`). For the main node, use:
+   ```
+   ssh root@main.aos-unit
+   ```
+     and for accessing secondary unit, use:
+   ```
+   ssh root@secondary.aos-unit
+   ```
 Congratulations! You have successfully deployed your virtual AosEdge Unit. Now you need to provision it and it will be ready to run your edge services!  
 
 ## Architecture & Core Principles
