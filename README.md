@@ -1,6 +1,4 @@
-# AosEdge Unit Orchestrator
-
-**Production-grade multi-VM management system for AosEdge deployments**
+# AosEdge Virtual Unit Orchestrator
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)](https://www.kernel.org/)
