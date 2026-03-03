@@ -155,13 +155,13 @@ function flush_node() {
 
     if (current_arch != "" && !is_valid_arch(current_arch)) {
         print "ERROR: Invalid architecture: " current_arch " (node: " current_name ")" > "/dev/stderr"
-        print "       Valid values: amd64, arm64, arm" > "/dev/stderr"
+        print "       Valid values: amd64, arm64" > "/dev/stderr"
         exit 1
     }
 
     if ((current_cpu_type != "" || current_machine_type != "") && current_arch == "") {
         print "ERROR: Architecture must be specified when using custom cpu_type or machine_type (node: " current_name ")" > "/dev/stderr"
-        print "       Please add: arch: amd64|arm64|arm" > "/dev/stderr"
+        print "       Please add: arch: amd64|arm64" > "/dev/stderr"
         exit 1
     }
 
