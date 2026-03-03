@@ -320,6 +320,8 @@ add_vm() {
     local mac_lc
     mac_lc=$(validate_mac_addr "$mac")
 
+    add_tap "${tap}"
+
     local tmp="$VMS_CONF.tmp"
 
     log "Register VM: mac=$mac_lc host=$host${ip:+ ip=$ip}"
@@ -351,8 +353,6 @@ add_vm() {
     if [[ -n $ip ]]; then
         update_hosts_add "$ip" "${host}"
     fi
-
-    add_tap "${tap}"
 }
 
 del_vm() {
