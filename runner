@@ -181,10 +181,6 @@ if [[ -z $IMAGE_DIR ]]; then
     IMAGE_DIR="$DEFAULT_IMGS_PATH"
 fi
 
-if [[ ! -d $IMAGE_DIR ]]; then
-    die "$EXIT_CONFIG_ERROR" "Images directory not found: $IMAGE_DIR"
-fi
-
 parse_config_file "$CONFIG_FILE" "$IMAGE_DIR"
 
 if [[ -z $IMAGE_DIR ]]; then
