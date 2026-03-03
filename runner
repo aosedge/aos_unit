@@ -647,7 +647,7 @@ cleanup() {
     log "Runner shutting down..."
 
     local units=()
-    mapfile -t units < <(systemctl list-units --no-legend 'aos-node-*' 2>/dev/null | awk '{print $1}')
+    mapfile -t units < <(systemctl list-units --no-legend 'aos-unit-node-*' 2>/dev/null | awk '{print $1}')
 
     if [[ ${#units[@]} -gt 0 ]]; then
         log "Stopping ${#units[@]} VM unit(s)..."
