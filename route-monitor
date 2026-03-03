@@ -32,15 +32,13 @@ while true; do
             # Another route event during quiet window; reset timer
             :
         else
-            ret=$?
-            # Start ip monitor as a coprocess (exec to avoid subshell)
             if kill -0 "${ipmon_pid}" 2>/dev/null; then
-                # Coprocess is alive -> It was a successful timeout
+                # read timed out — changes have settled
                 echo "Route changes settled. Applying NAT rules..."
                 "${LIBEXEC_DIR}/network-helper" add-nat || true
                 pending=0
             else
-                # EOF (ret=1) means ip monitor died
+                # kill -0 failed — ip monitor died
                 echo "Error: ip monitor stream ended unexpectedly."
                 exit 1
             fi
