@@ -4,7 +4,6 @@
 # Usage: awk -f parse_unit_config.awk unit_config.yaml
 #
 # Output format:
-#   SECONDARY_COUNT=N
 #   NODE_ARGS="name1|image|ip|arch|machine_type|cpu_type|cpu|mem name2|..."
 #
 # Notes / supported YAML subset:
@@ -263,7 +262,5 @@ in_node_configs {
 
 END {
     flush_node()
-    secondary_count = (node_count > 0) ? node_count - 1 : 0
-    print "SECONDARY_COUNT=" secondary_count
     print "NODE_ARGS=\"" node_args "\""
 }

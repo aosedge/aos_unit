@@ -80,7 +80,6 @@ readonly RUNNER_PID_FILE="${RUNTIME_DIRECTORY}/runner.pid"
 
 CONFIG_FILE=""
 IMAGE_DIR=""
-SECONDARY_COUNT=0
 declare -a NODE_SPECS=()
 
 parse_config_file() {
@@ -103,7 +102,6 @@ parse_config_file() {
     fi
 
     local node_args=""
-    local secondary_count=""
 
     while IFS='=' read -r key value; do
         key="${key//[[:space:]]/}"
@@ -113,9 +111,6 @@ parse_config_file() {
         case "$key" in
             NODE_ARGS)
                 node_args="$value"
-                ;;
-            SECONDARY_COUNT)
-                secondary_count="$value"
                 ;;
             "") ;;
             *)
@@ -128,14 +123,7 @@ parse_config_file() {
         die "$EXIT_CONFIG_ERROR" "No nodes found in configuration"
     fi
 
-    if [[ $secondary_count == "null" || -z $secondary_count ]]; then
-        secondary_count=0
-    fi
-
-    log "Configuration valid. Secondary nodes: $secondary_count"
-
     IMAGE_DIR="$images_path"
-    SECONDARY_COUNT="$secondary_count"
 
     read -ra NODE_SPECS <<<"$node_args" || true
 }
@@ -192,15 +180,11 @@ fi
 if [[ ! -r $IMAGE_DIR ]]; then
     die "$EXIT_CONFIG_ERROR" "Image directory not readable: $IMAGE_DIR"
 fi
-if [[ ! $SECONDARY_COUNT =~ ^[0-9]+$ ]]; then
-    die "$EXIT_CONFIG_ERROR" "Invalid secondary count: $SECONDARY_COUNT"
-fi
 if [[ ${#NODE_SPECS[@]} -eq 0 ]]; then
     die "$EXIT_CONFIG_ERROR" "No node specifications provided"
 fi
 
 log "Image directory: $IMAGE_DIR"
-log "Secondary nodes: $SECONDARY_COUNT"
 log "Node specifications: ${#NODE_SPECS[@]}"
 
 generate_mac() {
