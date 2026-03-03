@@ -6,7 +6,7 @@ case "$1" in
     configure)
         # Create system user if it doesn't exist
         if ! getent passwd aos-unit >/dev/null 2>&1; then
-            adduser --system --group --home /var/lib/aos-unit --shell /bin/bash \
+            adduser --system --group --home /var/lib/aos-unit --shell /usr/sbin/nologin \
                 --gecos "AosEdge Unit Service" aos-unit
         fi
 
