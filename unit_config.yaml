@@ -2,7 +2,7 @@
 # This file defines the nodes (VMs) to be created
 #
 # Each node must have:
-#   - name: Node identifier (alphanumeric, dots, underscores, hyphens only)
+#   - name: Node identifier (alphanumeric only)
 #   - cpu: Number of CPU cores (positive integer)
 #   - mem: Memory allocation (integer with optional M or G suffix)
 #
