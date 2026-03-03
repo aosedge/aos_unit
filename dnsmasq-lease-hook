@@ -14,4 +14,4 @@ mac="${2:-}"
 ip="${3:-}"
 host="${4:-}"
 
-exec "${LIBEXEC_DIR}/network-helper" lease-event "$action" "$mac" "$ip" "$host"
+exec env "RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" "${LIBEXEC_DIR}/network-helper" lease-event "$action" "$mac" "$ip" "$host"
