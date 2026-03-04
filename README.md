@@ -87,7 +87,7 @@ systemd (host)
 │   ├── (runtime): route-monitor         # Watches uplink/default-route changes via netlink
 │   ├── (runtime): network-helper        # Applies NAT rules; updated on route changes
 │   ├── ExecStop: vm-shutdown            # Send ACPI shutdown to qemu VMs
-│   └── ExecStopPost: service-cleanup    # Stop spawned units + teardown bridge/nft
+│   └── ExecStopPost: service-cleanup    # Teardown bridge, nftables
 │
 ├── aos-unit-dnsmasq.service             # Transient unit (DHCP + DNS on alt port)
 │   └── dnsmasq-lease-hook               # DHCP lease event hook

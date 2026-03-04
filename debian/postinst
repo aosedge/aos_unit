@@ -45,8 +45,8 @@ Data directories:
   /var/lib/aos-unit  - VM images
   /var/log/aos-unit  - VM logs
 
-User command:
-  aos-unit  - Entry point
+Service lifecycle is managed exclusively via systemctl:
+    systemctl start|stop|restart|status aos-unit
 
 Documentation:
   man aos-unit

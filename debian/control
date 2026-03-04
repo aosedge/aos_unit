@@ -25,7 +25,7 @@ Depends: ${misc:Depends},
 Description: AosEdge Unit - VM management for edge computing
  AosEdge Unit provides automated VM management for edge computing
  deployments. It manages QEMU/KVM virtual machines with network
- bridging, DHCP, and port forwarding.
+ bridging, DHCP, and local DNS.
  .
  This package supports both x86_64 and aarch64 guest architectures
  via TCG emulation, allowing cross-architecture VM deployment
