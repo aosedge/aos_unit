@@ -1,4 +1,4 @@
-[Allow aos-unit to manage systemd units]
+[Allow aos-unit to start transient units]
 Identity=unix-user:aos-unit
 Action=org.freedesktop.systemd1.manage-units
 ResultAny=yes

@@ -44,7 +44,6 @@ rollback() {
     log "Startup failed (exit $exit_code). Rolling back..."
     set +e
 
-    systemctl stop "$DNSMASQ_SERVICE" 2>/dev/null || true
     if [[ $nft_applied -eq 1 ]]; then
         nft delete table inet aos_unit 2>/dev/null || true
     fi
@@ -221,9 +220,6 @@ hostsdir="${RUNTIME_DIRECTORY}/${DNS_HOSTS_DIR}"
 dhcp-hostsdir="${RUNTIME_DIRECTORY}/${DNS_HOSTS_DIR}"
 EOF
 
-systemctl stop "$DNSMASQ_SERVICE" 2>/dev/null || true
-systemctl reset-failed "$DNSMASQ_SERVICE" 2>/dev/null || true
-
 dns_test_out=$(/usr/sbin/dnsmasq --test --conf-file="$CONF_FILE" 2>&1) || {
     error_multi <<<"$dns_test_out"
     die "${EXIT_RUNTIME_ERROR}" "dnsmasq config test failed"
@@ -266,6 +262,7 @@ systemd-run \
     --property="RestrictRealtime=yes" \
     --property="SystemCallArchitectures=native" \
     --property="ReadWritePaths=${RUNTIME_DIRECTORY}" \
+    --collect \
     --quiet -- \
     /usr/sbin/dnsmasq --keep-in-foreground --conf-file="$CONF_FILE"
 

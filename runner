@@ -77,8 +77,6 @@ check_kvm_available() {
     return 0
 }
 
-readonly RUNNER_PID_FILE="${RUNTIME_DIRECTORY}/runner.pid"
-
 CONFIG_FILE=""
 IMAGE_DIR=""
 declare -a NODE_SPECS=()
@@ -392,22 +390,6 @@ if [[ ${#NODES_TO_START[@]} -eq 0 ]]; then
 fi
 log "Prepared ${#NODES_TO_START[@]} node(s) for startup"
 
-cleanup_transient_unit() {
-    local svc="${1}.service"
-
-    if systemctl show "$svc" >/dev/null 2>&1; then
-        systemctl stop "$svc" 2>/dev/null || true
-        systemctl reset-failed "$svc" 2>/dev/null || true
-    fi
-
-    local frag
-    frag="$(systemctl show -p FragmentPath --value "$svc" 2>/dev/null || true)"
-    if [[ $frag == "/run/systemd/transient/${svc}" ]]; then
-        rm -f "$frag" 2>/dev/null || true
-        systemctl daemon-reload 2>/dev/null || true
-    fi
-}
-
 start_qemu_vm() {
     local node_name="$1"
     local image_path="$2"
@@ -555,8 +537,6 @@ EOF
         exec_stop_post="${exec_stop_post} ${ip}"
     fi
 
-    cleanup_transient_unit "${unit_name}"
-
     systemd-run \
         --unit="$unit_name" \
         --description="AosEdge Unit VM: ${node_name} (${arch})" \
@@ -609,6 +589,7 @@ EOF
         --property="MemoryMax=${systemd_mem}" \
         --property="OOMPolicy=kill" \
         --property="CPUQuota=$((cpu_count * 100))%" \
+        --collect \
         --quiet -- \
         "${qemu_cmd[@]}"
 
@@ -626,30 +607,9 @@ EOF
     log "    Access via: ssh ${node_name}.aos-unit"
 }
 
-cleanup() {
-    log "Runner shutting down..."
-
-    local units=()
-    mapfile -t units < <(systemctl list-units --no-legend 'aos-unit-node-*' 2>/dev/null | awk '{print $1}')
-
-    if [[ ${#units[@]} -gt 0 ]]; then
-        log "Stopping ${#units[@]} VM unit(s)..."
-        for unit in "${units[@]}"; do
-            systemctl stop "$unit" 2>/dev/null || true
-        done
-        sleep 2
-    fi
-
-    rm -f "$RUNNER_PID_FILE" 2>/dev/null || true
-    log "Cleanup complete"
-}
-
-trap cleanup EXIT SIGTERM SIGINT
+trap 'exit 0' SIGTERM SIGINT
 
 log "AosEdge Unit Runner starting (PID: $$)"
-
-echo $$ >"$RUNNER_PID_FILE"
-log "PID file created: $RUNNER_PID_FILE"
 
 log "Starting QEMU VMs..."
 

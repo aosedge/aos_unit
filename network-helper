@@ -29,9 +29,6 @@ readonly FORWARD_CHAIN="forward"
 readonly DHCP_HOSTS_FILE="${RUNTIME_DIRECTORY}/${DHCP_HOSTS_DIR}/hosts"
 readonly DNS_HOSTS_FILE="${RUNTIME_DIRECTORY}/${DNS_HOSTS_DIR}/hosts"
 
-readonly DNSMASQ_UNIT="aos-unit-dnsmasq"
-readonly DNSMASQ_SERVICE="${DNSMASQ_UNIT}.service"
-
 readonly ROUTEMONITOR_UNIT="aos-unit-route-monitor"
 readonly ROUTEMONITOR_SERVICE="${ROUTEMONITOR_UNIT}.service"
 
@@ -134,23 +131,13 @@ EOF
             --property="RestrictRealtime=yes" \
             --property="SystemCallArchitectures=native" \
             --property="ReadWritePaths=${RUNTIME_DIRECTORY}" \
+            --collect \
             --quiet -- \
             "${LIBEXEC_DIR}/route-monitor"
     fi
 }
 
 del_nat() {
-    # Kill the monitor immediately so it doesn't try to re-add rules while we are cleaning them up.
-    if systemctl is-active --quiet "${ROUTEMONITOR_SERVICE}"; then
-        log "Stopping route monitor transient unit: ${ROUTEMONITOR_SERVICE}"
-        systemctl stop "${ROUTEMONITOR_SERVICE}" 2>/dev/null || true
-    fi
-
-    if systemctl is-failed --quiet "${ROUTEMONITOR_SERVICE}"; then
-        log "Resetting failed state: ${ROUTEMONITOR_SERVICE}"
-        systemctl reset-failed "${ROUTEMONITOR_SERVICE}" 2>/dev/null || true
-    fi
-
     lock
 
     if ! table_present; then
