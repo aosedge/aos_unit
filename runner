@@ -14,6 +14,7 @@ readonly LOG_TAG="aos-unit:runner"
 : "${STATE_DIRECTORY:?STATE_DIRECTORY is undefined. Check systemd unit.}"
 : "${LOGS_DIRECTORY:?LOGS_DIRECTORY is undefined. Check systemd unit.}"
 : "${CONFIGURATION_DIRECTORY:?CONFIGURATION_DIRECTORY is undefined. Check systemd unit.}"
+: "${NETWORK_CONFIG:?NETWORK_CONFIG is undefined. Check systemd unit.}"
 
 : "${BRIDGE_NAME:?BRIDGE_NAME missing in $NETWORK_CONFIG}"
 : "${BRIDGE_IP:?BRIDGE_IP missing in $NETWORK_CONFIG}"
@@ -561,6 +562,8 @@ EOF
         --description="AosEdge Unit VM: ${node_name} (${arch})" \
         --property="EnvironmentFile=${RUNTIME_DIRECTORY}/${NETWORK_CONFIG}" \
         --property="Environment=NETWORK_CONFIG=${NETWORK_CONFIG}" \
+        --property="Environment=DHCP_HOSTS_DIR=${DHCP_HOSTS_DIR}" \
+        --property="Environment=DNS_HOSTS_DIR=${DNS_HOSTS_DIR}" \
         --slice=aos-unit.slice \
         --property="Type=simple" \
         --property="After=aos-unit.service" \

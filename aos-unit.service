@@ -30,6 +30,8 @@ ExecStopPost=/usr/libexec/aos-unit/service-cleanup
 EnvironmentFile=/etc/aos-unit/runtime.conf
 EnvironmentFile=-/run/aos-unit/network.conf
 Environment="NETWORK_CONFIG=network.conf"
+Environment="DHCP_HOSTS_DIR=dnsmasq.d/dhcp-hosts"
+Environment="DNS_HOSTS_DIR=dnsmasq.d/dns-hosts"
 
 # CRITICAL: Grant networking privileges to the non-root user
 # Without these capabilities, the aos-unit user cannot:

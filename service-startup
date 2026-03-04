@@ -10,6 +10,9 @@ readonly LOG_TAG="aos-unit:startup"
 . "${LIBEXEC_DIR}/log-helper"
 
 : "${RUNTIME_DIRECTORY:?RUNTIME_DIRECTORY is undefined. Check systemd unit.}"
+: "${NETWORK_CONFIG:?NETWORK_CONFIG is undefined. Check systemd unit.}"
+: "${DHCP_HOSTS_DIR:?DHCP_HOSTS_DIR is undefined. Check systemd unit.}"
+: "${DNS_HOSTS_DIR:?DNS_HOSTS_DIR is undefined. Check systemd unit.}"
 
 readonly EXIT_CONFIG_ERROR=2
 readonly EXIT_RUNTIME_ERROR=1
@@ -26,12 +29,10 @@ readonly DNSMASQ_SERVICE="${DNSMASQ_UNIT}.service"
 
 readonly DHCP_LEASE_TIME="12h"
 
-mkdir -p "$RUNTIME_DIRECTORY" "$RUNTIME_DIRECTORY/dnsmasq.d"
+mkdir -p "${RUNTIME_DIRECTORY}/${DHCP_HOSTS_DIR}" "${RUNTIME_DIRECTORY}/${DNS_HOSTS_DIR}"
+
 exec 9>"$NET_LOCK"
 flock -x 9
-
-readonly HOSTS_FILE="$RUNTIME_DIRECTORY/dnsmasq.d/hosts"
-touch "${HOSTS_FILE}"
 
 bridge_created=0
 nft_applied=0
@@ -185,10 +186,6 @@ nft -f "$RULESET"
 nft_applied=1
 log "nft skeleton applied (table inet aos_unit)"
 
-# 3) dnsmasq config (+ include file for VM whitelist/names)
-readonly VM_REG="$RUNTIME_DIRECTORY/dnsmasq.d/vms.conf"
-: >"$VM_REG"
-
 readonly CONF_FILE="$RUNTIME_DIRECTORY/dnsmasq.conf"
 readonly LEASES_FILE="$RUNTIME_DIRECTORY/dnsmasq.leases"
 
@@ -209,7 +206,6 @@ no-resolv
 no-hosts
 server=${UPSTREAM_DNS}
 
-addn-hosts=${HOSTS_FILE}
 dhcp-script=${LIBEXEC_DIR}/dnsmasq-lease-hook
 
 # DHCP
@@ -220,8 +216,9 @@ dhcp-leasefile=${LEASES_FILE}
 dhcp-ignore-clid
 dhcp-ignore-names
 
-# VM whitelist + hostnames
-conf-file=${VM_REG}
+# VM hostnames + DHCP hosts
+hostsdir="${RUNTIME_DIRECTORY}/${DNS_HOSTS_DIR}"
+dhcp-hostsdir="${RUNTIME_DIRECTORY}/${DNS_HOSTS_DIR}"
 EOF
 
 systemctl stop "$DNSMASQ_SERVICE" 2>/dev/null || true
@@ -238,6 +235,8 @@ systemd-run \
     --description="AosEdge dnsmasq @${BRIDGE_IP}" \
     --property="EnvironmentFile=${RUNTIME_DIRECTORY}/${NETWORK_CONFIG}" \
     --property="Environment=NETWORK_CONFIG=${NETWORK_CONFIG}" \
+    --property="Environment=DHCP_HOSTS_DIR=${DHCP_HOSTS_DIR}" \
+    --property="Environment=DNS_HOSTS_DIR=${DNS_HOSTS_DIR}" \
     --property="Type=simple" \
     --property="BindsTo=aos-unit.service" \
     --property="User=aos-unit" \

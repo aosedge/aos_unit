@@ -10,6 +10,9 @@ readonly LOG_TAG="aos-unit:network-helper"
 . "${LIBEXEC_DIR}/log-helper"
 
 : "${RUNTIME_DIRECTORY:?RUNTIME_DIRECTORY is undefined. Check systemd unit.}"
+: "${NETWORK_CONFIG:?NETWORK_CONFIG is undefined. Check systemd unit.}"
+: "${DHCP_HOSTS_DIR:?DHCP_HOSTS_DIR is undefined. Check systemd unit.}"
+: "${DNS_HOSTS_DIR:?DNS_HOSTS_DIR is undefined. Check systemd unit.}"
 
 : "${BRIDGE_NAME:?BRIDGE_NAME missing in $NETWORK_CONFIG}"
 
@@ -23,8 +26,8 @@ readonly TABLE_NAME="aos_unit"
 readonly POSTROUTING_CHAIN="postrouting"
 readonly FORWARD_CHAIN="forward"
 
-readonly VMS_CONF="$RUNTIME_DIRECTORY/dnsmasq.d/vms.conf"
-readonly HOSTS_FILE="$RUNTIME_DIRECTORY/dnsmasq.d/hosts"
+readonly DHCP_HOSTS_FILE="${RUNTIME_DIRECTORY}/${DHCP_HOSTS_DIR}/hosts"
+readonly DNS_HOSTS_FILE="${RUNTIME_DIRECTORY}/${DNS_HOSTS_DIR}/hosts"
 
 readonly DNSMASQ_UNIT="aos-unit-dnsmasq"
 readonly DNSMASQ_SERVICE="${DNSMASQ_UNIT}.service"
@@ -32,9 +35,8 @@ readonly DNSMASQ_SERVICE="${DNSMASQ_UNIT}.service"
 readonly ROUTEMONITOR_UNIT="aos-unit-route-monitor"
 readonly ROUTEMONITOR_SERVICE="${ROUTEMONITOR_UNIT}.service"
 
-mkdir -p "$RUNTIME_DIRECTORY/dnsmasq.d"
-touch "$HOSTS_FILE"
-touch "$VMS_CONF"
+touch "$DNS_HOSTS_FILE"
+touch "$DHCP_HOSTS_FILE"
 
 lock() {
     exec 9>"$NET_LOCK"
@@ -60,15 +62,6 @@ resolve_internet_interface() {
         fi
     else
         detect_internet_interface
-    fi
-}
-
-dnsmasq_reload() {
-    if systemctl is-active --quiet "$DNSMASQ_SERVICE" 2>/dev/null; then
-        systemctl kill -s HUP "$DNSMASQ_SERVICE" 2>/dev/null || true
-        log "Reloaded dnsmasq (unit $DNSMASQ_SERVICE)"
-    else
-        log "dnsmasq unit not active; reload skipped ($DNSMASQ_SERVICE)"
     fi
 }
 
@@ -110,6 +103,8 @@ EOF
             --description="AosEdge Route Monitor (Uplink: ${uplink:-None})" \
             --property="EnvironmentFile=${RUNTIME_DIRECTORY}/${NETWORK_CONFIG}" \
             --property="Environment=NETWORK_CONFIG=${NETWORK_CONFIG}" \
+            --property="Environment=DHCP_HOSTS_DIR=${DHCP_HOSTS_DIR}" \
+            --property="Environment=DNS_HOSTS_DIR=${DNS_HOSTS_DIR}" \
             --property="Type=simple" \
             --property="BindsTo=aos-unit.service" \
             --property="User=aos-unit" \
@@ -176,7 +171,7 @@ update_hosts_add() {
     local ip_addr="$1"
     local host="$2"
     local fqdn="${host}.aos-unit"
-    local tmp="${HOSTS_FILE}.tmp"
+    local tmp="${DNS_HOSTS_FILE}~"
 
     awk -v ip="$ip_addr" -v h="$host" -v f="$fqdn" '
     {
@@ -188,15 +183,13 @@ update_hosts_add() {
     END {
         print ip " " f " " h
     }
-    ' "$HOSTS_FILE" >"$tmp" && mv "$tmp" "$HOSTS_FILE"
-
-    dnsmasq_reload
+    ' "$DNS_HOSTS_FILE" >"$tmp" && mv "$tmp" "$DNS_HOSTS_FILE"
 }
 
 update_hosts_del() {
     local host="$1"
     local fqdn="${host}.aos-unit"
-    local tmp="${HOSTS_FILE}.tmp"
+    local tmp="${DNS_HOSTS_FILE}~"
 
     awk -v h="$host" -v f="$fqdn" '
     {
@@ -205,9 +198,7 @@ update_hosts_del() {
         }
         print $0
     }
-    ' "$HOSTS_FILE" >"$tmp" && mv "$tmp" "$HOSTS_FILE"
-
-    dnsmasq_reload
+    ' "$DNS_HOSTS_FILE" >"$tmp" && mv "$tmp" "$DNS_HOSTS_FILE"
 }
 
 validate_host_name() {
@@ -322,7 +313,7 @@ add_vm() {
 
     add_tap "${tap}"
 
-    local tmp="$VMS_CONF.tmp"
+    local tmp="${DHCP_HOSTS_FILE}~"
 
     log "Register VM: mac=$mac_lc host=$host${ip:+ ip=$ip}"
 
@@ -348,7 +339,7 @@ add_vm() {
     }
     { print $0 }
     END { if (!wrote) print newline() }
-    ' "$VMS_CONF" >"$tmp" && mv "$tmp" "$VMS_CONF"
+    ' "$DHCP_HOSTS_FILE" >"$tmp" && mv "$tmp" "$DHCP_HOSTS_FILE"
 
     if [[ -n $ip ]]; then
         update_hosts_add "$ip" "${host}"
@@ -374,14 +365,14 @@ del_vm() {
 
     del_tap "${tap}"
 
-    if [[ ! -f $VMS_CONF ]]; then
+    if [[ ! -f $DHCP_HOSTS_FILE ]]; then
         log "VM registry missing; nothing to remove"
         exit 0
     fi
 
     log "Unregister VM: mac=$mac_lc host=$host${ip:+ ip=$ip}"
 
-    local tmp="$VMS_CONF.tmp"
+    local tmp="${DHCP_HOSTS_FILE}~"
     awk -v m="$mac_lc" '
     BEGIN { IGNORECASE=1 }
     $0 ~ /^dhcp-host=/ {
@@ -393,7 +384,7 @@ del_vm() {
         if (tolower(mac)==m) next
     }
     { print $0 }
-    ' "$VMS_CONF" >"$tmp" && mv "$tmp" "$VMS_CONF"
+    ' "$DHCP_HOSTS_FILE" >"$tmp" && mv "$tmp" "$DHCP_HOSTS_FILE"
 
     update_hosts_del "${host}"
 }
@@ -421,7 +412,7 @@ lookup_vm_record() {
         print ip "|" host
         exit 0
     }
-    ' "$VMS_CONF" 2>/dev/null || true
+    ' "$DHCP_HOSTS_FILE" 2>/dev/null || true
 }
 
 lease_event() {

@@ -10,6 +10,7 @@ readonly LOG_TAG="aos-unit:cleanup"
 . "${LIBEXEC_DIR}/log-helper"
 
 : "${RUNTIME_DIRECTORY:?RUNTIME_DIRECTORY is undefined. Check systemd unit.}"
+: "${NETWORK_CONFIG:?NETWORK_CONFIG is undefined. Check systemd unit.}"
 
 : "${BRIDGE_NAME:?BRIDGE_NAME missing in $NETWORK_CONFIG}"
 
