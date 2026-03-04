@@ -30,3 +30,4 @@ aos-unit etc/logrotate.d
 
 # Documentation
 README.md usr/share/doc/aos-unit/
+vm-shutdown usr/libexec/aos-unit/

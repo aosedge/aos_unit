@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Send ACPI power-down to a QEMU VM via QMP, then wait for it to stop.
+# Invoked as ExecStop= in the transient VM unit so systemd's own
+# TimeoutStopSec / KillSignal handling still applies if the guest
+# ignores the ACPI event.
+#
+# Copyright (c) 2018-2026 EPAM Systems Inc.
+
+set -Eeuo pipefail
+
+LIBEXEC_DIR="$(dirname "$(realpath "$0")")"
+readonly LIBEXEC_DIR
+
+readonly LOG_TAG="aos-unit:vm-shutdown"
+. "${LIBEXEC_DIR}/log-helper"
+
+: "${RUNTIME_DIRECTORY:?RUNTIME_DIRECTORY is undefined. Check systemd unit.}"
+
+send_qmp_powerdown() {
+    local node_name="$1"
+    local -r qmp_socket="${RUNTIME_DIRECTORY}/${node_name}.qmp"
+
+    if [[ ! -S $qmp_socket ]]; then
+        log "QMP socket not found for ${node_name}: ${qmp_socket} — skipping graceful shutdown"
+        return 0
+    fi
+
+    log "Sending ACPI power-down to ${node_name} via QMP..."
+
+    # QMP requires a capability negotiation before commands are accepted.
+    # printf sends: negotiate capabilities, then system_powerdown.
+    # socat exits after the server closes the connection or after the VM
+    # acknowledges the command (whichever comes first).
+    printf '{"execute":"qmp_capabilities"}\n{"execute":"system_powerdown"}\n' |
+        socat - "UNIX-CONNECT:${qmp_socket}" >/dev/null 2>&1 || {
+        log "QMP command delivery failed for ${node_name} (guest may have already exited)"
+        return 0
+    }
+    log "ACPI power-down sent to ${node_name}"
+
+    while [[ -S $qmp_socket ]]; do
+        sleep 0.5
+    done
+    log "Guest ${node_name} has halted"
+}
+
+main() {
+    local -r node_name="${1:?node name required}"
+    send_qmp_powerdown "$node_name"
+}
+
+main "$@"

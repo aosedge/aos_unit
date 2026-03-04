@@ -581,6 +581,8 @@ start_qemu_vm() {
         exec_stop_post="${exec_stop_post} ${ip}"
     fi
 
+    local -r exec_stop="${LIBEXEC_DIR}/vm-shutdown ${node_name}"
+
     systemd-run \
         --unit="$unit_name" \
         --description="AosEdge Unit VM: ${node_name} (${arch})" \
@@ -628,6 +630,7 @@ start_qemu_vm() {
         --property="StartLimitBurst=${HEALTH_MAX_RESTARTS:-3}" \
         --property="TimeoutStartSec=${VM_START_TIMEOUT:-60s}" \
         --property="ExecStartPre=${exec_start_pre}" \
+        --property="ExecStop=${exec_stop}" \
         --property="ExecStopPost=${exec_stop_post}" \
         --property="OnFailure=aos-unit-vm-failed@${unit_name}.service" \
         --property="MemoryMax=${systemd_mem}" \
