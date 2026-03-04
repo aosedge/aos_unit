@@ -91,7 +91,7 @@ function is_valid_image_filename(filename) {
     if (filename ~ /\//) return 0
     if (filename ~ /[[:space:]]/) return 0
     if (filename ~ /\|/) return 0
-    if (filename !~ /\.(qcow2|raw|img)$/) return 0
+    if (filename !~ /\.qcow2$/) return 0
     return 1
 }
 
@@ -143,7 +143,7 @@ function flush_node() {
 
     if (current_image != "" && !is_valid_image_filename(current_image)) {
         print "ERROR: Invalid image filename: " current_image > "/dev/stderr"
-        print "       Must be filename only (no paths/spaces) with .qcow2, .raw, or .img extension" > "/dev/stderr"
+        print "       Must be filename only (no paths/spaces) with .qcow2 extension" > "/dev/stderr"
         exit 1
     }
 

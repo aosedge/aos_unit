@@ -245,6 +245,9 @@ resolve_node_image() {
     local arch="$3"
 
     if [[ -n $custom_image ]]; then
+        if [[ $custom_image != *.qcow2 ]]; then
+            die "$EXIT_CONFIG_ERROR" "Custom image must be a .qcow2 file: $custom_image (for node: $node_name)"
+        fi
         local -r image_file="${IMAGE_DIR}/${custom_image}"
         if [[ ! -f $image_file ]]; then
             die "$EXIT_CONFIG_ERROR" "Custom image not found: $image_file (for node: $node_name)"
