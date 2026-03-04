@@ -314,10 +314,10 @@ validate_static_ip() {
     if ((ip_int == bridge_int)); then
         die "$EXIT_CONFIG_ERROR" "Custom IP $custom_ip for node '$node_name' conflicts with AosEdge bridge ($BRIDGE_IP)"
     fi
-    if [[ -n ${_allocated[$custom_ip]:-} ]]; then
+    if [[ -n ${_allocated["$custom_ip"]:-} ]]; then
         die "$EXIT_CONFIG_ERROR" "Duplicate static IP $custom_ip detected (assigned to multiple nodes)"
     fi
-    _allocated[custom_ip]=1
+    _allocated["$custom_ip"]=1
 }
 
 prepare_nodes() {
