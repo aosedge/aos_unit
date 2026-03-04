@@ -32,9 +32,6 @@ readonly DNS_HOSTS_FILE="${RUNTIME_DIRECTORY}/${DNS_HOSTS_DIR}/hosts"
 readonly ROUTEMONITOR_UNIT="aos-unit-route-monitor"
 readonly ROUTEMONITOR_SERVICE="${ROUTEMONITOR_UNIT}.service"
 
-touch "$DNS_HOSTS_FILE"
-touch "$DHCP_HOSTS_FILE"
-
 lock() {
     exec 9>"$NET_LOCK"
     flock -x 9
@@ -88,7 +85,7 @@ EOF
         die "${EXIT_RUNTIME_ERROR}" "Failed to apply nft NAT rules"
     fi
 
-    # Spawn Monitor only if not already running and no static interface forced
+    # Spawn monitor only if not already running and no static interface forced
     if [[ -z ${INTERNET_INTERFACE:-} ]]; then
         if systemctl is-active --quiet "${ROUTEMONITOR_SERVICE}"; then
             return 0
@@ -99,9 +96,10 @@ EOF
             --unit="${ROUTEMONITOR_SERVICE}" \
             --description="AosEdge Route Monitor (Uplink: ${uplink:-None})" \
             --property="EnvironmentFile=${RUNTIME_DIRECTORY}/${NETWORK_CONFIG}" \
-            --property="Environment=NETWORK_CONFIG=${NETWORK_CONFIG}" \
-            --property="Environment=DHCP_HOSTS_DIR=${DHCP_HOSTS_DIR}" \
-            --property="Environment=DNS_HOSTS_DIR=${DNS_HOSTS_DIR}" \
+            --setenv="RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" \
+            --setenv="NETWORK_CONFIG=${NETWORK_CONFIG}" \
+            --setenv="DHCP_HOSTS_DIR=${DHCP_HOSTS_DIR}" \
+            --setenv="DNS_HOSTS_DIR=${DNS_HOSTS_DIR}" \
             --property="Type=simple" \
             --property="BindsTo=aos-unit.service" \
             --property="User=aos-unit" \
@@ -115,7 +113,6 @@ EOF
             --property="KillSignal=SIGTERM" \
             --property="TimeoutStopSec=5s" \
             --property="SendSIGKILL=yes" \
-            --setenv="RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" \
             --property="NoNewPrivileges=yes" \
             --property="PrivateTmp=yes" \
             --property="ProtectSystem=strict" \
@@ -452,13 +449,20 @@ lease_event() {
     esac
 }
 
-cmd="${1:-}"
-shift || true
-case "$cmd" in
-    add-nat) add_nat ;;
-    del-nat) del_nat ;;
-    add-vm) add_vm "$@" ;;
-    del-vm) del_vm "$@" ;;
-    lease-event) lease_event "$@" ;;
-    *) die "${EXIT_CONFIG_ERROR}" "Unknown command: $cmd" ;;
-esac
+main() {
+    touch "$DNS_HOSTS_FILE"
+    touch "$DHCP_HOSTS_FILE"
+
+    local cmd="${1:-}"
+    shift || true
+    case "$cmd" in
+        add-nat) add_nat ;;
+        del-nat) del_nat ;;
+        add-vm) add_vm "$@" ;;
+        del-vm) del_vm "$@" ;;
+        lease-event) lease_event "$@" ;;
+        *) die "${EXIT_CONFIG_ERROR}" "Unknown command: $cmd" ;;
+    esac
+}
+
+main "$@"

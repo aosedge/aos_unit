@@ -16,20 +16,34 @@ readonly LOG_TAG="aos-unit:cleanup"
 
 readonly NET_LOCK="${RUNTIME_DIRECTORY}/net.lock"
 
-mkdir -p "$RUNTIME_DIRECTORY"
-exec 9>"$NET_LOCK"
-flock -x 9
+revert_resolved() {
+    if command -v resolvectl >/dev/null 2>&1; then
+        log "Reverting systemd-resolved settings for ${BRIDGE_NAME}"
+        resolvectl revert "$BRIDGE_NAME" || true
+    fi
+}
 
-if command -v resolvectl >/dev/null 2>&1; then
-    log "Reverting systemd-resolved settings for ${BRIDGE_NAME}"
-    resolvectl revert "$BRIDGE_NAME" || true
-fi
+remove_nft_table() {
+    nft delete table inet aos_unit 2>/dev/null || true
+    log "nft table inet aos_unit removed"
+}
 
-nft delete table inet aos_unit 2>/dev/null || true
-log "nft table inet aos_unit removed"
+remove_bridge() {
+    log "Removing bridge: $BRIDGE_NAME"
+    ip link set "$BRIDGE_NAME" down 2>/dev/null || true
+    ip link delete "$BRIDGE_NAME" type bridge 2>/dev/null || ip link delete "$BRIDGE_NAME" 2>/dev/null || true
+}
 
-log "Removing bridge: $BRIDGE_NAME"
-ip link set "$BRIDGE_NAME" down 2>/dev/null || true
-ip link delete "$BRIDGE_NAME" type bridge 2>/dev/null || ip link delete "$BRIDGE_NAME" 2>/dev/null || true
+main() {
+    mkdir -p "$RUNTIME_DIRECTORY"
+    exec 9>"$NET_LOCK"
+    flock -x 9
 
-log "Cleanup complete"
+    revert_resolved
+    remove_nft_table
+    remove_bridge
+
+    log "Cleanup complete"
+}
+
+main

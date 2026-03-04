@@ -20,7 +20,6 @@ readonly EXIT_RUNTIME_ERROR=1
 readonly NET_LOCK="${RUNTIME_DIRECTORY}/net.lock"
 
 readonly DHCP_CIDR="${DHCP_CIDR:-10.200.1.0/24}"
-
 readonly DNS_ALT_PORT="${DNS_ALT_PORT:-5300}"
 readonly UPSTREAM_DNS="${UPSTREAM_DNS:-127.0.0.53}"
 
@@ -29,26 +28,29 @@ readonly DNSMASQ_SERVICE="${DNSMASQ_UNIT}.service"
 
 readonly DHCP_LEASE_TIME="12h"
 
-mkdir -p "${RUNTIME_DIRECTORY}/${DHCP_HOSTS_DIR}" "${RUNTIME_DIRECTORY}/${DNS_HOSTS_DIR}"
+# Globals populated by create_bridge / derive_network_config
+BRIDGE_NAME=""
+BRIDGE_IP=""
+DHCP_START=""
+DHCP_END=""
 
-exec 9>"$NET_LOCK"
-flock -x 9
+# Rollback state flags (mutated across functions, read by rollback())
+BRIDGE_CREATED=0
+NFT_APPLIED=0
+CLEANUP_NEEDED=1
 
-bridge_created=0
-nft_applied=0
-cleanup_needed=1
 rollback() {
     local exit_code=$?
-    [[ $cleanup_needed -eq 1 ]] || return 0
+    [[ $CLEANUP_NEEDED -eq 1 ]] || return 0
 
     log "Startup failed (exit $exit_code). Rolling back..."
     set +e
 
-    if [[ $nft_applied -eq 1 ]]; then
+    if [[ $NFT_APPLIED -eq 1 ]]; then
         nft delete table inet aos_unit 2>/dev/null || true
     fi
 
-    if ((bridge_created)); then
+    if ((BRIDGE_CREATED)); then
         if command -v resolvectl >/dev/null 2>&1; then
             resolvectl revert "$BRIDGE_NAME" 2>/dev/null || true
         fi
@@ -58,13 +60,10 @@ rollback() {
 
     log "Rollback complete."
 }
-trap rollback EXIT
 
-# 0) Create network configuration
 derive_network_config() {
     local prefix="${DHCP_CIDR#*/}"
     local host_bits=$((32 - prefix))
-    local temp_file
 
     if ((prefix >= 31 || prefix < 8)); then
         die "${EXIT_CONFIG_ERROR}" "Error: Prefix /${prefix} is not supported. Must be between /8 and /30."
@@ -83,7 +82,6 @@ derive_network_config() {
     bcast_int=$(bcast_int_from_net_mask "$net_int" "$mask_int")
 
     local bridge_int=$((net_int + 1))
-
     local usable_hosts=$(((1 << host_bits) - 2))
     local dhcp_start_int=$((bridge_int + (usable_hosts / 2)))
     local dhcp_end_int=$((bcast_int - 1))
@@ -102,6 +100,7 @@ derive_network_config() {
     DHCP_END=$(int_to_ip "$dhcp_end_int")
     readonly DHCP_END
 
+    local temp_file
     temp_file=$(mktemp "${RUNTIME_DIRECTORY}/${NETWORK_CONFIG}.XXXXXX") ||
         die "${EXIT_RUNTIME_ERROR}" "Error: Failed to create temporary network config file"
 
@@ -115,44 +114,48 @@ EOF
     log "Runtime network configuration written to ${NETWORK_CONFIG}"
 }
 
-# 1) Bridge (exclusive ownership)
-machine_id="$(cat /etc/machine-id)"
-readonly BRIDGE_NAME="aosbr${machine_id:0:6}"
-if ip link show "$BRIDGE_NAME" &>/dev/null; then
-    die "${EXIT_RUNTIME_ERROR}" "Bridge '$BRIDGE_NAME' already exists; aos-unit requires exclusive ownership."
-fi
+create_bridge() {
+    local machine_id
+    machine_id="$(cat /etc/machine-id)"
+    BRIDGE_NAME="aosbr${machine_id:0:6}"
+    readonly BRIDGE_NAME
 
-derive_network_config # set BRIDGE_IP
+    if ip link show "$BRIDGE_NAME" &>/dev/null; then
+        die "${EXIT_RUNTIME_ERROR}" "Bridge '$BRIDGE_NAME' already exists; aos-unit requires exclusive ownership."
+    fi
 
-log "Creating bridge: $BRIDGE_NAME ($BRIDGE_IP)"
-ip link add "$BRIDGE_NAME" type bridge
-bridge_created=1
-ip addr add "$BRIDGE_IP/${DHCP_CIDR#*/}" dev "$BRIDGE_NAME"
-ip link set "$BRIDGE_NAME" up
+    derive_network_config
 
-# 2) nft skeleton
-readonly RULESET="$RUNTIME_DIRECTORY/firewall-skeleton.nft"
+    log "Creating bridge: $BRIDGE_NAME ($BRIDGE_IP)"
+    ip link add "$BRIDGE_NAME" type bridge
+    BRIDGE_CREATED=1
+    ip addr add "$BRIDGE_IP/${DHCP_CIDR#*/}" dev "$BRIDGE_NAME"
+    ip link set "$BRIDGE_NAME" up
+}
 
-dns_redirect_rules=""
-dns_output_redirect_rules=""
-if [[ $DNS_ALT_PORT != "53" ]]; then
-    dns_redirect_rules=$(
-        cat <<EOF
-    iifname "${BRIDGE_NAME}" udp dport 53 dnat to :${DNS_ALT_PORT}
-    iifname "${BRIDGE_NAME}" tcp dport 53 dnat to :${DNS_ALT_PORT}
+apply_nft_skeleton() {
+    local -r ruleset="$RUNTIME_DIRECTORY/firewall-skeleton.nft"
+
+    local dns_redirect_rules=""
+    local dns_output_redirect_rules=""
+    if [[ $DNS_ALT_PORT != "53" ]]; then
+        dns_redirect_rules=$(
+            cat <<EOF
+        iifname "${BRIDGE_NAME}" udp dport 53 dnat to :${DNS_ALT_PORT}
+        iifname "${BRIDGE_NAME}" tcp dport 53 dnat to :${DNS_ALT_PORT}
 EOF
-    )
-    dns_output_redirect_rules=$(
-        cat <<EOF
-    ip daddr ${BRIDGE_IP} udp dport 53 dnat to ${BRIDGE_IP}:${DNS_ALT_PORT}
-    ip daddr ${BRIDGE_IP} tcp dport 53 dnat to ${BRIDGE_IP}:${DNS_ALT_PORT}
+        )
+        dns_output_redirect_rules=$(
+            cat <<EOF
+        ip daddr ${BRIDGE_IP} udp dport 53 dnat to ${BRIDGE_IP}:${DNS_ALT_PORT}
+        ip daddr ${BRIDGE_IP} tcp dport 53 dnat to ${BRIDGE_IP}:${DNS_ALT_PORT}
 EOF
-    )
-fi
+        )
+    fi
 
-nft delete table inet aos_unit 2>/dev/null || true
+    nft delete table inet aos_unit 2>/dev/null || true
 
-cat >"$RULESET" <<EOF
+    cat >"$ruleset" <<EOF
 #!/usr/sbin/nft -f
 
 table inet aos_unit {
@@ -180,15 +183,17 @@ ${dns_output_redirect_rules}
 }
 EOF
 
-nft -c -f "$RULESET"
-nft -f "$RULESET"
-nft_applied=1
-log "nft skeleton applied (table inet aos_unit)"
+    nft -c -f "$ruleset"
+    nft -f "$ruleset"
+    NFT_APPLIED=1
+    log "nft skeleton applied (table inet aos_unit)"
+}
 
-readonly CONF_FILE="$RUNTIME_DIRECTORY/dnsmasq.conf"
-readonly LEASES_FILE="$RUNTIME_DIRECTORY/dnsmasq.leases"
+configure_and_start_dnsmasq() {
+    local -r conf_file="$RUNTIME_DIRECTORY/dnsmasq.conf"
+    local -r leases_file="$RUNTIME_DIRECTORY/dnsmasq.leases"
 
-cat >"$CONF_FILE" <<EOF
+    cat >"$conf_file" <<EOF
 # aos-unit dnsmasq
 interface=${BRIDGE_NAME}
 bind-interfaces
@@ -211,90 +216,109 @@ dhcp-script=${LIBEXEC_DIR}/dnsmasq-lease-hook
 dhcp-range=${DHCP_START},${DHCP_END},${DHCP_LEASE_TIME}
 dhcp-option=3,${BRIDGE_IP}
 dhcp-option=6,${BRIDGE_IP}
-dhcp-leasefile=${LEASES_FILE}
+dhcp-leasefile=${leases_file}
 dhcp-ignore-clid
 dhcp-ignore-names
 
 # VM hostnames + DHCP hosts
-hostsdir="${RUNTIME_DIRECTORY}/${DNS_HOSTS_DIR}"
-dhcp-hostsdir="${RUNTIME_DIRECTORY}/${DNS_HOSTS_DIR}"
+hostsdir=${RUNTIME_DIRECTORY}/${DNS_HOSTS_DIR}
+dhcp-hostsdir=${RUNTIME_DIRECTORY}/${DHCP_HOSTS_DIR}
 EOF
 
-dns_test_out=$(/usr/sbin/dnsmasq --test --conf-file="$CONF_FILE" 2>&1) || {
-    error_multi <<<"$dns_test_out"
-    die "${EXIT_RUNTIME_ERROR}" "dnsmasq config test failed"
+    local dns_test_out
+    dns_test_out=$(/usr/sbin/dnsmasq --test --conf-file="$conf_file" 2>&1) || {
+        error_multi <<<"$dns_test_out"
+        die "${EXIT_RUNTIME_ERROR}" "dnsmasq config test failed"
+    }
+
+    log "Starting dnsmasq as transient unit: ${DNSMASQ_SERVICE}"
+    systemd-run \
+        --unit="$DNSMASQ_UNIT" \
+        --description="AosEdge dnsmasq @${BRIDGE_IP}" \
+        --property="EnvironmentFile=${RUNTIME_DIRECTORY}/${NETWORK_CONFIG}" \
+        --setenv="RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" \
+        --setenv="NETWORK_CONFIG=${NETWORK_CONFIG}" \
+        --setenv="DHCP_HOSTS_DIR=${DHCP_HOSTS_DIR}" \
+        --setenv="DNS_HOSTS_DIR=${DNS_HOSTS_DIR}" \
+        --property="Type=simple" \
+        --property="BindsTo=aos-unit.service" \
+        --property="User=aos-unit" \
+        --property="Group=aos-unit" \
+        --property="AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW" \
+        --property="CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW" \
+        --property="RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6" \
+        --property="Restart=on-failure" \
+        --property="RestartSec=1s" \
+        --property="KillMode=control-group" \
+        --property="KillSignal=SIGTERM" \
+        --property="TimeoutStopSec=5s" \
+        --property="SendSIGKILL=yes" \
+        --property="NoNewPrivileges=yes" \
+        --property="PrivateTmp=yes" \
+        --property="ProtectSystem=strict" \
+        --property="ProtectHome=yes" \
+        --property="ProtectKernelTunables=yes" \
+        --property="ProtectKernelModules=yes" \
+        --property="ProtectControlGroups=yes" \
+        --property="ProtectKernelLogs=yes" \
+        --property="PrivateDevices=yes" \
+        --property="LockPersonality=yes" \
+        --property="MemoryDenyWriteExecute=yes" \
+        --property="RestrictNamespaces=yes" \
+        --property="RestrictRealtime=yes" \
+        --property="SystemCallArchitectures=native" \
+        --property="ReadWritePaths=${RUNTIME_DIRECTORY}" \
+        --collect \
+        --quiet -- \
+        /usr/sbin/dnsmasq --keep-in-foreground --conf-file="$conf_file"
+
+    if ! systemctl is-active --quiet "$DNSMASQ_SERVICE" 2>/dev/null; then
+        systemctl --no-pager -l status "$DNSMASQ_SERVICE" 2>&1 | error_multi || true
+        die "${EXIT_RUNTIME_ERROR}" "dnsmasq transient unit failed to start: ${DNSMASQ_SERVICE}"
+    fi
+
+    log "dnsmasq started (systemd unit ${DNSMASQ_SERVICE})"
 }
 
-log "Starting dnsmasq as transient unit: ${DNSMASQ_SERVICE}"
-systemd-run \
-    --unit="$DNSMASQ_UNIT" \
-    --description="AosEdge dnsmasq @${BRIDGE_IP}" \
-    --property="EnvironmentFile=${RUNTIME_DIRECTORY}/${NETWORK_CONFIG}" \
-    --property="Environment=NETWORK_CONFIG=${NETWORK_CONFIG}" \
-    --property="Environment=DHCP_HOSTS_DIR=${DHCP_HOSTS_DIR}" \
-    --property="Environment=DNS_HOSTS_DIR=${DNS_HOSTS_DIR}" \
-    --property="Type=simple" \
-    --property="BindsTo=aos-unit.service" \
-    --property="User=aos-unit" \
-    --property="Group=aos-unit" \
-    --property="AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW" \
-    --property="CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW" \
-    --property="RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6" \
-    --property="Restart=on-failure" \
-    --property="RestartSec=1s" \
-    --property="KillMode=control-group" \
-    --property="KillSignal=SIGTERM" \
-    --property="TimeoutStopSec=5s" \
-    --property="SendSIGKILL=yes" \
-    --setenv="RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" \
-    --property="NoNewPrivileges=yes" \
-    --property="PrivateTmp=yes" \
-    --property="ProtectSystem=strict" \
-    --property="ProtectHome=yes" \
-    --property="ProtectKernelTunables=yes" \
-    --property="ProtectKernelModules=yes" \
-    --property="ProtectControlGroups=yes" \
-    --property="ProtectKernelLogs=yes" \
-    --property="PrivateDevices=yes" \
-    --property="LockPersonality=yes" \
-    --property="MemoryDenyWriteExecute=yes" \
-    --property="RestrictNamespaces=yes" \
-    --property="RestrictRealtime=yes" \
-    --property="SystemCallArchitectures=native" \
-    --property="ReadWritePaths=${RUNTIME_DIRECTORY}" \
-    --collect \
-    --quiet -- \
-    /usr/sbin/dnsmasq --keep-in-foreground --conf-file="$CONF_FILE"
+configure_resolved_routing() {
+    if ! command -v resolvectl >/dev/null 2>&1; then
+        die "${EXIT_RUNTIME_ERROR}" "resolvectl not found; host DNS routing for *.aos-unit is required"
+    fi
 
-if ! systemctl is-active --quiet "$DNSMASQ_SERVICE" 2>/dev/null; then
-    systemctl --no-pager -l status "$DNSMASQ_SERVICE" 2>&1 | error_multi || true
-    die "${EXIT_RUNTIME_ERROR}" "dnsmasq transient unit failed to start: ${DNSMASQ_SERVICE}"
-fi
+    log "Configuring systemd-resolved routing: ~aos-unit via ${BRIDGE_IP} on ${BRIDGE_NAME}"
 
-log "dnsmasq started (systemd unit ${DNSMASQ_SERVICE})"
+    if ! resolvectl dns "$BRIDGE_NAME" "$BRIDGE_IP"; then
+        die "${EXIT_RUNTIME_ERROR}" "Failed to configure systemd-resolved DNS on ${BRIDGE_NAME} (polkit rule required)"
+    fi
 
-# 4) systemd-resolved routing (required for host access to *.aos-unit)
-if ! command -v resolvectl >/dev/null 2>&1; then
-    die "${EXIT_RUNTIME_ERROR}" "resolvectl not found; host DNS routing for *.aos-unit is required"
-fi
+    if ! resolvectl domain "$BRIDGE_NAME" "~aos-unit"; then
+        die "${EXIT_RUNTIME_ERROR}" "Failed to configure systemd-resolved domain routing on ${BRIDGE_NAME} (polkit rule required)"
+    fi
 
-log "Configuring systemd-resolved routing: ~aos-unit via ${BRIDGE_IP} on ${BRIDGE_NAME}"
+    if ! resolvectl dnssec "$BRIDGE_NAME" no; then
+        die "${EXIT_RUNTIME_ERROR}" "Failed to disable DNSSEC on ${BRIDGE_NAME}"
+    fi
 
-if ! resolvectl dns "$BRIDGE_NAME" "$BRIDGE_IP"; then
-    die "${EXIT_RUNTIME_ERROR}" "Failed to configure systemd-resolved DNS on ${BRIDGE_NAME} (polkit rule required)"
-fi
+    if ! resolvectl dnsovertls "$BRIDGE_NAME" no; then
+        die "${EXIT_RUNTIME_ERROR}" "Failed to disable DoT on ${BRIDGE_NAME}"
+    fi
+}
 
-if ! resolvectl domain "$BRIDGE_NAME" "~aos-unit"; then
-    die "${EXIT_RUNTIME_ERROR}" "Failed to configure systemd-resolved domain routing on ${BRIDGE_NAME} (polkit rule required)"
-fi
+main() {
+    mkdir -p "${RUNTIME_DIRECTORY}/${DHCP_HOSTS_DIR}" "${RUNTIME_DIRECTORY}/${DNS_HOSTS_DIR}"
+    exec 9>"$NET_LOCK"
+    flock -x 9
 
-if ! resolvectl dnssec "$BRIDGE_NAME" no; then
-    die "${EXIT_RUNTIME_ERROR}" "Failed to disable DNSSEC on ${BRIDGE_NAME}"
-fi
-if ! resolvectl dnsovertls "$BRIDGE_NAME" no; then
-    die "${EXIT_RUNTIME_ERROR}" "Failed to disable DoT on ${BRIDGE_NAME}"
-fi
+    trap rollback EXIT
 
-cleanup_needed=0
-trap - EXIT ERR
-log "Startup complete"
+    create_bridge
+    apply_nft_skeleton
+    configure_and_start_dnsmasq
+    configure_resolved_routing
+
+    CLEANUP_NEEDED=0
+    trap - EXIT ERR
+    log "Startup complete"
+}
+
+main

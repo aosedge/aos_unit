@@ -4,7 +4,7 @@
 
 # Informational message (stdout)
 log() {
-    printf '%s: %s\n' "$LOG_TAG" "$*"
+    printf '%s: %s\n' "$LOG_TAG" "$*" >&2
 }
 
 # Error message (stderr)

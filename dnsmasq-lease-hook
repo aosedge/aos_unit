@@ -9,9 +9,14 @@ readonly LIBEXEC_DIR
 
 : "${RUNTIME_DIRECTORY:?RUNTIME_DIRECTORY undefined}"
 
-action="${1:?action required}"
-mac="${2:-}"
-ip="${3:-}"
-host="${4:-}"
+main() {
+    local action="${1:?action required}"
+    local mac="${2:-}"
+    local ip="${3:-}"
+    local host="${4:-}"
 
-exec env "RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" "${LIBEXEC_DIR}/network-helper" lease-event "$action" "$mac" "$ip" "$host"
+    exec env "RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" \
+        "${LIBEXEC_DIR}/network-helper" lease-event "$action" "$mac" "$ip" "$host"
+}
+
+main "$@"

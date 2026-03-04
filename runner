@@ -44,6 +44,15 @@ readonly OVMF_VARS_ARM="/usr/share/AAVMF/AAVMF_VARS.fd"
 
 readonly DISK_FORMAT="qcow2"
 
+# Globals set during initialisation and argument parsing
+HOST_ARCH=""
+CONFIG_FILE=""
+IMAGE_DIR=""
+declare -a NODE_SPECS=()
+
+# Global populated by prepare_nodes(), consumed by launch_all_vms()
+declare -a NODES_TO_START=()
+
 detect_host_arch() {
     case "$(uname -m)" in
         x86_64)
@@ -57,10 +66,6 @@ detect_host_arch() {
             ;;
     esac
 }
-
-HOST_ARCH="$(detect_host_arch)"
-readonly HOST_ARCH
-log "Host architecture: $HOST_ARCH"
 
 check_kvm_available() {
     local vm_arch="$1"
@@ -77,9 +82,48 @@ check_kvm_available() {
     return 0
 }
 
-CONFIG_FILE=""
-IMAGE_DIR=""
-declare -a NODE_SPECS=()
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --config)
+                [[ -n ${2:-} ]] || die "$EXIT_CONFIG_ERROR" "--config requires an argument"
+                CONFIG_FILE="$2"
+                shift 2
+                ;;
+            --images)
+                [[ -n ${2:-} ]] || die "$EXIT_CONFIG_ERROR" "--images requires an argument"
+                IMAGE_DIR="$2"
+                shift 2
+                ;;
+            -h | --help)
+                cat <<EOF
+Usage: $0 [OPTIONS]
+
+Options:
+    --config PATH     Configuration file (default: ${DEFAULT_CONFIG_PATH})
+    --images PATH     Images directory (default: ${DEFAULT_IMGS_PATH})
+    -h, --help        Show this help
+EOF
+                exit 0
+                ;;
+            -*)
+                die "$EXIT_CONFIG_ERROR" "Unknown option: $1"
+                ;;
+            *)
+                die "$EXIT_CONFIG_ERROR" "Unexpected argument: $1 (direct mode has been removed; use --config ${DEFAULT_CONFIG_PATH})"
+                ;;
+        esac
+    done
+
+    if [[ -z $CONFIG_FILE ]]; then
+        log "No config file specified, using default: $DEFAULT_CONFIG_PATH"
+        CONFIG_FILE="$DEFAULT_CONFIG_PATH"
+    fi
+
+    if [[ -z $IMAGE_DIR ]]; then
+        IMAGE_DIR="$DEFAULT_IMGS_PATH"
+    fi
+}
 
 parse_config_file() {
     local config_file="$1"
@@ -127,64 +171,23 @@ parse_config_file() {
     read -ra NODE_SPECS <<<"$node_args" || true
 }
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --config)
-            [[ -n ${2:-} ]] || die "$EXIT_CONFIG_ERROR" "--config requires an argument"
-            CONFIG_FILE="$2"
-            shift 2
-            ;;
-        --images)
-            [[ -n ${2:-} ]] || die "$EXIT_CONFIG_ERROR" "--images requires an argument"
-            IMAGE_DIR="$2"
-            shift 2
-            ;;
-        -h | --help)
-            cat <<EOF
-Usage: $0 [OPTIONS]
+validate_config() {
+    if [[ -z $IMAGE_DIR ]]; then
+        die "$EXIT_CONFIG_ERROR" "Image directory not specified (use --images)"
+    fi
+    if [[ ! -d $IMAGE_DIR ]]; then
+        die "$EXIT_CONFIG_ERROR" "Image directory does not exist: $IMAGE_DIR"
+    fi
+    if [[ ! -r $IMAGE_DIR ]]; then
+        die "$EXIT_CONFIG_ERROR" "Image directory not readable: $IMAGE_DIR"
+    fi
+    if [[ ${#NODE_SPECS[@]} -eq 0 ]]; then
+        die "$EXIT_CONFIG_ERROR" "No node specifications provided"
+    fi
 
-Options:
-    --config PATH     Configuration file (default: ${DEFAULT_CONFIG_PATH})
-    --images PATH     Images directory (default: ${DEFAULT_IMGS_PATH})
-    -h, --help        Show this help
-EOF
-            exit 0
-            ;;
-        -*)
-            die "$EXIT_CONFIG_ERROR" "Unknown option: $1"
-            ;;
-        *)
-            die "$EXIT_CONFIG_ERROR" "Unexpected argument: $1 (direct mode has been removed; use --config ${DEFAULT_CONFIG_PATH})"
-            ;;
-    esac
-done
-
-if [[ -z $CONFIG_FILE ]]; then
-    log "No config file specified, using default: $DEFAULT_CONFIG_PATH"
-    CONFIG_FILE="$DEFAULT_CONFIG_PATH"
-fi
-
-if [[ -z $IMAGE_DIR ]]; then
-    IMAGE_DIR="$DEFAULT_IMGS_PATH"
-fi
-
-parse_config_file "$CONFIG_FILE" "$IMAGE_DIR"
-
-if [[ -z $IMAGE_DIR ]]; then
-    die "$EXIT_CONFIG_ERROR" "Image directory not specified (use --images)"
-fi
-if [[ ! -d $IMAGE_DIR ]]; then
-    die "$EXIT_CONFIG_ERROR" "Image directory does not exist: $IMAGE_DIR"
-fi
-if [[ ! -r $IMAGE_DIR ]]; then
-    die "$EXIT_CONFIG_ERROR" "Image directory not readable: $IMAGE_DIR"
-fi
-if [[ ${#NODE_SPECS[@]} -eq 0 ]]; then
-    die "$EXIT_CONFIG_ERROR" "No node specifications provided"
-fi
-
-log "Image directory: $IMAGE_DIR"
-log "Node specifications: ${#NODE_SPECS[@]}"
+    log "Image directory: $IMAGE_DIR"
+    log "Node specifications: ${#NODE_SPECS[@]}"
+}
 
 generate_mac() {
     local name="$1"
@@ -236,159 +239,243 @@ map_oci_to_qemu_arch() {
     esac
 }
 
-declare -a NODES_TO_START=()
-declare -A allocated_ips
-
-log "Preparing nodes from configuration..."
-
-for node_spec in "${NODE_SPECS[@]}"; do
-    IFS='|' read -r name custom_image custom_ip custom_arch \
-        custom_machine_type custom_cpu_type cpu mem uefi_en <<<"$node_spec"
-
-    log "Processing node: $name"
-
-    if [[ -n $custom_arch ]]; then
-        arch="$(map_oci_to_qemu_arch "$custom_arch")"
-        log "    Architecture: $arch (explicit)"
-    else
-        arch="$HOST_ARCH"
-        log "    Architecture: $arch (host default)"
-    fi
+resolve_node_image() {
+    local node_name="$1"
+    local custom_image="$2"
+    local arch="$3"
 
     if [[ -n $custom_image ]]; then
-        image_file="${IMAGE_DIR}/${custom_image}"
+        local -r image_file="${IMAGE_DIR}/${custom_image}"
         if [[ ! -f $image_file ]]; then
-            die "$EXIT_CONFIG_ERROR" "Custom image not found: $image_file (for node: $name)"
+            die "$EXIT_CONFIG_ERROR" "Custom image not found: $image_file (for node: $node_name)"
         fi
         log "    Image: $custom_image (custom)"
-    else
-        case "$arch" in
-            x86_64)
-                arch_suffix="amd64"
-                legacy_arch="qemux86-64"
-                ;;
-            aarch64)
-                arch_suffix="arm64"
-                legacy_arch="qemuarm64"
-                ;;
-            *) die "$EXIT_RUNTIME_ERROR" "Unknown architecture $arch!" ;;
-        esac
+        echo "$image_file"
+        return
+    fi
 
-        # Final regex: e.g., ^aos-vm-main-(amd64|qemux86-64)*\.qcow2$
-        img_regex="^${IMAGE_PREFIX}${name}-(${arch_suffix}|${legacy_arch}).*\.${DISK_FORMAT}$"
+    local arch_suffix legacy_arch
+    case "$arch" in
+        x86_64)
+            arch_suffix="amd64"
+            legacy_arch="qemux86-64"
+            ;;
+        aarch64)
+            arch_suffix="arm64"
+            legacy_arch="qemuarm64"
+            ;;
+        *) die "$EXIT_RUNTIME_ERROR" "Unknown architecture $arch!" ;;
+    esac
 
-        # Find the first file matching the regex
-        found_img=""
-        for file in "$IMAGE_DIR"/*; do
-            [[ -e $file ]] || continue # Skip if directory is empty
+    # Final regex: e.g., ^aos-vm-main-(amd64|qemux86-64)*\.qcow2$
+    local img_regex="^${IMAGE_PREFIX}${node_name}-(${arch_suffix}|${legacy_arch}).*\.${DISK_FORMAT}$"
 
-            basename_file="${file##*/}"
-            if [[ $basename_file =~ $img_regex ]]; then
-                found_img="$basename_file"
-                break
+    local found_img="" file basename_file
+    for file in "$IMAGE_DIR"/*; do
+        [[ -e $file ]] || continue
+        basename_file="${file##*/}"
+        if [[ $basename_file =~ $img_regex ]]; then
+            found_img="$basename_file"
+            break
+        fi
+    done
+
+    if [[ -z $found_img ]]; then
+        die "$EXIT_CONFIG_ERROR" "Image not found for node: $node_name" "regex searched: $img_regex"
+    fi
+
+    log "  Image: $found_img (auto-discovered)"
+    echo "${IMAGE_DIR}/${found_img}"
+}
+
+validate_static_ip() {
+    local node_name="$1"
+    local custom_ip="$2"
+    # Associative array passed by name for duplicate tracking
+    local -n _allocated="$3"
+
+    local ip_int mask_int bridge_int net_int bcast_int
+    ip_int=$(ip_to_int "$custom_ip")
+    mask_int=$(ip_to_int "$NETMASK")
+    bridge_int=$(ip_to_int "$BRIDGE_IP")
+    net_int=$(net_int_from_ip_mask "$bridge_int" "$mask_int")
+    bcast_int=$(bcast_int_from_net_mask "$net_int" "$mask_int")
+    bridge_int=$((net_int + 1))
+
+    if (((ip_int & mask_int) != net_int)); then
+        die "$EXIT_CONFIG_ERROR" "Custom IP $custom_ip for node '$node_name' is outside the subnet"
+    fi
+    if ((ip_int == net_int)); then
+        die "$EXIT_CONFIG_ERROR" "Custom IP $custom_ip for node '$node_name' conflicts with network address"
+    fi
+    if ((ip_int == bcast_int)); then
+        die "$EXIT_CONFIG_ERROR" "Custom IP $custom_ip for node '$node_name' conflicts with broadcast address"
+    fi
+    if ((ip_int == bridge_int)); then
+        die "$EXIT_CONFIG_ERROR" "Custom IP $custom_ip for node '$node_name' conflicts with AosEdge bridge ($BRIDGE_IP)"
+    fi
+    if [[ -n ${_allocated[$custom_ip]:-} ]]; then
+        die "$EXIT_CONFIG_ERROR" "Duplicate static IP $custom_ip detected (assigned to multiple nodes)"
+    fi
+    _allocated[custom_ip]=1
+}
+
+prepare_nodes() {
+    declare -A allocated_ips
+
+    log "Preparing nodes from configuration..."
+
+    local node_spec
+    for node_spec in "${NODE_SPECS[@]}"; do
+        local name custom_image custom_ip custom_arch custom_machine_type custom_cpu_type cpu mem uefi_en
+        IFS='|' read -r name custom_image custom_ip custom_arch \
+            custom_machine_type custom_cpu_type cpu mem uefi_en <<<"$node_spec"
+
+        log "Processing node: $name"
+
+        local arch
+        if [[ -n $custom_arch ]]; then
+            arch="$(map_oci_to_qemu_arch "$custom_arch")"
+            log "    Architecture: $arch (explicit)"
+        else
+            arch="$HOST_ARCH"
+            log "    Architecture: $arch (host default)"
+        fi
+
+        local image_file
+        image_file="$(resolve_node_image "$name" "$custom_image" "$arch")"
+
+        local ip=""
+        if [[ -n $custom_ip ]]; then
+            validate_static_ip "$name" "$custom_ip" allocated_ips
+            ip="$custom_ip"
+            log "    IP: $ip (static via DHCP reservation)"
+        else
+            log "    IP: (dynamic via DHCP)"
+        fi
+
+        local machine_type
+        if [[ -n $custom_machine_type ]]; then
+            machine_type="$custom_machine_type"
+            log "    Machine type: $machine_type (custom)"
+        else
+            case "$arch" in
+                x86_64) machine_type="$DEFAULT_MACHINE_TYPE_AMD64" ;;
+                aarch64) machine_type="$DEFAULT_MACHINE_TYPE_ARM64" ;;
+            esac
+            log "    Machine type: $machine_type (default)"
+        fi
+
+        local cpu_type
+        if [[ -n $custom_cpu_type ]]; then
+            cpu_type="$custom_cpu_type"
+            log "    CPU type: $cpu_type (custom)"
+        else
+            case "$arch" in
+                x86_64) cpu_type="$DEFAULT_CPU_TYPE_AMD64" ;;
+                aarch64) cpu_type="$DEFAULT_CPU_TYPE_ARM64" ;;
+            esac
+            log "    CPU type: $cpu_type (default)"
+        fi
+
+        local use_kvm
+        if [[ ${ENABLE_KVM:-true} == "false" ]]; then
+            use_kvm="false"
+            log "    KVM: is not enabled (ENABLE_KVM is undefined or set to 'false')"
+        elif check_kvm_available "$arch"; then
+            use_kvm="true"
+            log "    KVM: enabled (native architecture)"
+        else
+            use_kvm="false"
+            if [[ $arch != "$HOST_ARCH" ]]; then
+                log "    KVM: disabled (cross-arch: host=$HOST_ARCH, vm=$arch)"
+            else
+                log "    KVM: disabled (/dev/kvm not available)"
             fi
-        done
+        fi
 
-        if [[ -n $found_img ]]; then
-            image_file="${IMAGE_DIR}/${found_img}"
-            log "  Image: $found_img (auto-discovered)"
+        local uefi_boot="false"
+        if [[ -n $uefi_en && $uefi_en != "null" ]]; then
+            uefi_boot="${uefi_en,,}" # Force lowercase for safety
+            log "  Boot mode: UEFI=${uefi_boot} (explicit config)"
+        elif [[ ${image_file,,} == *uefi* ]]; then
+            uefi_boot="true"
+            log "  Boot mode: UEFI=true (auto-detected from filename)"
         else
-            die "$EXIT_CONFIG_ERROR" "Image not found for node: $name" "regex searched: $img_regex"
+            log "  Boot mode: UEFI=false (default)"
         fi
+
+        local mac
+        mac="$(generate_mac "$name")"
+        log "    MAC: $mac"
+        log "    CPU: $cpu, Memory: $mem"
+
+        NODES_TO_START+=("${name}|${image_file}|${arch}|${mac}|${ip}|${cpu}|${mem}|${machine_type}|${cpu_type}|${use_kvm}|${uefi_boot}")
+    done
+
+    if [[ ${#NODES_TO_START[@]} -eq 0 ]]; then
+        die "$EXIT_CONFIG_ERROR" "No valid nodes prepared"
+    fi
+    log "Prepared ${#NODES_TO_START[@]} node(s) for startup"
+}
+
+rotate_debug_log() {
+    local node_name="$1"
+    local debug_log_path="$2"
+
+    log "  Forcing log rotation for previous debug session..."
+
+    local lr_conf="${RUNTIME_DIRECTORY}/${node_name}-logrotate.conf"
+    local lr_status="${RUNTIME_DIRECTORY}/${node_name}-logrotate.status"
+
+    cat >"$lr_conf" <<EOF
+"${debug_log_path}" {
+    rotate 5
+    missingok
+    notifempty
+    copytruncate
+    compress
+    delaycompress
+}
+EOF
+    logrotate -s "$lr_status" -f "$lr_conf"
+    rm -f "$lr_conf" "$lr_status"
+}
+
+build_uefi_pflash_args() {
+    local arch="$1"
+    local node_name="$2"
+    # Output array passed by name (nameref)
+    local -n _cmd="$3"
+
+    local ovmf_code ovmf_vars
+    case "$arch" in
+        x86_64)
+            ovmf_code="$OVMF_CODE_X86"
+            ovmf_vars="$OVMF_VARS_X86"
+            ;;
+        aarch64)
+            ovmf_code="$OVMF_CODE_ARM"
+            ovmf_vars="$OVMF_VARS_ARM"
+            ;;
+    esac
+
+    if [[ ! -f $ovmf_code || ! -f $ovmf_vars ]]; then
+        die "$EXIT_RUNTIME_ERROR" "UEFI requested but firmware missing for $arch at $ovmf_code"
     fi
 
-    if [[ -n $custom_ip ]]; then
-        # Convert to int for strict mathematical validation
-        ip_int=$(ip_to_int "$custom_ip")
-        mask_int=$(ip_to_int "$NETMASK")
-        bridge_int=$(ip_to_int "$BRIDGE_IP")
-        net_int=$(net_int_from_ip_mask "$bridge_int" "$mask_int")
-        bcast_int=$(bcast_int_from_net_mask "$net_int" "$mask_int")
-        bridge_int=$((net_int + 1))
-
-        if (((ip_int & mask_int) != net_int)); then
-            die "$EXIT_CONFIG_ERROR" "Custom IP $custom_ip for node '$name' is outside the subnet"
-        fi
-        if ((ip_int == net_int)); then
-            die "$EXIT_CONFIG_ERROR" "Custom IP $custom_ip for node '$name' conflicts with network address"
-        fi
-        if ((ip_int == bcast_int)); then
-            die "$EXIT_CONFIG_ERROR" "Custom IP $custom_ip for node '$name' conflicts with broadcast address"
-        fi
-        if ((ip_int == bridge_int)); then
-            die "$EXIT_CONFIG_ERROR" "Custom IP $custom_ip for node '$name' conflicts with AosEdge bridge ($BRIDGE_IP)"
-        fi
-        if [[ -n ${allocated_ips[$custom_ip]:-} ]]; then
-            die "$EXIT_CONFIG_ERROR" "Duplicate static IP $custom_ip detected (assigned to multiple nodes)"
-        fi
-        allocated_ips[$custom_ip]=1
-
-        ip="$custom_ip"
-        log "    IP: $ip (static via DHCP reservation)"
-    else
-        ip=""
-        log "    IP: (dynamic via DHCP)"
+    local ovmf_vars_vm="${RUNTIME_DIRECTORY}/${node_name}-VARS.fd"
+    if [[ ! -f $ovmf_vars_vm ]]; then
+        cp "$ovmf_vars" "$ovmf_vars_vm"
+        log "    Created UEFI vars: $(basename "$ovmf_vars_vm")"
     fi
 
-    if [[ -n $custom_machine_type ]]; then
-        machine_type="$custom_machine_type"
-        log "    Machine type: $machine_type (custom)"
-    else
-        case "$arch" in
-            x86_64) machine_type="$DEFAULT_MACHINE_TYPE_AMD64" ;;
-            aarch64) machine_type="$DEFAULT_MACHINE_TYPE_ARM64" ;;
-        esac
-        log "    Machine type: $machine_type (default)"
-    fi
-
-    if [[ -n $custom_cpu_type ]]; then
-        cpu_type="$custom_cpu_type"
-        log "    CPU type: $cpu_type (custom)"
-    else
-        case "$arch" in
-            x86_64) cpu_type="$DEFAULT_CPU_TYPE_AMD64" ;;
-            aarch64) cpu_type="$DEFAULT_CPU_TYPE_ARM64" ;;
-        esac
-        log "    CPU type: $cpu_type (default)"
-    fi
-
-    if [[ ${ENABLE_KVM:-true} == "false" ]]; then
-        use_kvm="false"
-        log "    KVM: is not enabled (ENABLE_KVM is undefined or set to 'false')"
-    elif check_kvm_available "$arch"; then
-        use_kvm="true"
-        log "    KVM: enabled (native architecture)"
-    else
-        use_kvm="false"
-        if [[ $arch != "$HOST_ARCH" ]]; then
-            log "    KVM: disabled (cross-arch: host=$HOST_ARCH, vm=$arch)"
-        else
-            log "    KVM: disabled (/dev/kvm not available)"
-        fi
-    fi
-
-    uefi_boot="false"
-    if [[ -n $uefi_en && $uefi_en != "null" ]]; then
-        uefi_boot="${uefi_en,,}" # Force lowercase for safety
-        log "  Boot mode: UEFI=${uefi_boot} (explicit config)"
-    elif [[ ${image_file,,} == *uefi* ]]; then
-        uefi_boot="true"
-        log "  Boot mode: UEFI=true (auto-detected from filename)"
-    else
-        log "  Boot mode: UEFI=false (default)"
-    fi
-
-    mac="$(generate_mac "$name")"
-    log "    MAC: $mac"
-    log "    CPU: $cpu, Memory: $mem"
-
-    NODES_TO_START+=("${name}|${image_file}|${arch}|${mac}|${ip}|${cpu}|${mem}|${machine_type}|${cpu_type}|${use_kvm}|${uefi_boot}")
-done
-
-if [[ ${#NODES_TO_START[@]} -eq 0 ]]; then
-    die "$EXIT_CONFIG_ERROR" "No valid nodes prepared"
-fi
-log "Prepared ${#NODES_TO_START[@]} node(s) for startup"
+    # Mount the read-only CODE and read-write VARS as pflash drives
+    _cmd+=(
+        -drive "if=pflash,format=raw,readonly=on,file=${ovmf_code}"
+        -drive "if=pflash,format=raw,file=${ovmf_vars_vm}"
+    )
+}
 
 start_qemu_vm() {
     local node_name="$1"
@@ -416,8 +503,11 @@ start_qemu_vm() {
         log "    Network: MAC=$mac_addr, IP=(dynamic)"
     fi
 
-    local qmp_socket="${RUNTIME_DIRECTORY}/${node_name}.qmp"
-    local unit_name="aos-unit-node-${node_name}"
+    local -r unit_name="aos-unit-node-${node_name}"
+    local -r qmp_socket="${RUNTIME_DIRECTORY}/${node_name}.qmp"
+    local -r socket_path="${RUNTIME_DIRECTORY}/${node_name}.serial"
+    local -r serial_log_path="${LOGS_DIRECTORY}/${node_name}-serial.log"
+    local -r debug_log_path="${LOGS_DIRECTORY}/${node_name}-debug.log"
 
     local qemu_cmd=(
         "qemu-system-${arch}"
@@ -430,7 +520,6 @@ start_qemu_vm() {
 
     if [[ $use_kvm == "true" ]]; then
         qemu_cmd+=(-enable-kvm)
-
         # KVM implementation for Arm practically demands -cpu host to function properly
         if [[ $arch == "aarch64" ]]; then
             qemu_cmd+=(-cpu host)
@@ -442,48 +531,16 @@ start_qemu_vm() {
     fi
 
     if [[ $uefi_boot == "true" ]]; then
-        local ovmf_code=""
-        local ovmf_vars=""
-        local ovmf_vars_vm="${RUNTIME_DIRECTORY}/${node_name}-VARS.fd"
-
-        case "$arch" in
-            x86_64)
-                ovmf_code="$OVMF_CODE_X86"
-                ovmf_vars="$OVMF_VARS_X86"
-                ;;
-            aarch64)
-                ovmf_code="$OVMF_CODE_ARM"
-                ovmf_vars="$OVMF_VARS_ARM"
-                ;;
-        esac
-
-        if [[ -f $ovmf_code && -f $ovmf_vars ]]; then
-            # Copy fresh NVRAM for this specific VM if it doesn't exist
-            if [[ ! -f $ovmf_vars_vm ]]; then
-                cp "$ovmf_vars" "$ovmf_vars_vm"
-                log "    Created UEFI vars: $(basename "$ovmf_vars_vm")"
-            fi
-
-            # Mount the read-only CODE and read-write VARS as pflash drives
-            qemu_cmd+=(
-                -drive "if=pflash,format=raw,readonly=on,file=${ovmf_code}"
-                -drive "if=pflash,format=raw,file=${ovmf_vars_vm}"
-            )
-        else
-            die "$EXIT_RUNTIME_ERROR" "UEFI requested but firmware missing for $arch at $ovmf_code"
-        fi
+        build_uefi_pflash_args "$arch" "$node_name" qemu_cmd
     fi
 
-    # Generate TAP interface name from MAC addres
+    # Generate TAP interface name from MAC address
     local mac_nocolon="${mac_addr//:/}"
     local tap="aostap${mac_nocolon: -6}"
     if ((${#tap} > 15)); then
         die "$EXIT_RUNTIME_ERROR" "Generated tap name too long: $tap"
     fi
 
-    local socket_path="${RUNTIME_DIRECTORY}/${node_name}.serial"
-    local serial_log_path="${LOGS_DIRECTORY}/${node_name}-serial.log"
-    local debug_log_path="${LOGS_DIRECTORY}/${node_name}-debug.log"
     # usage:
     #   sudo socat -,raw,echo=0,escape=0x1d "UNIX-CONNECT:${socket_path}"
     qemu_cmd+=(
@@ -500,26 +557,10 @@ start_qemu_vm() {
         -qmp "unix:${qmp_socket},server,nowait"
     )
 
-    # On every startup qemu will overwrite its own logs
-    # In order not to lose them, enforce debug log rotation
+    # On every startup QEMU will overwrite its own logs.
+    # To avoid losing them, enforce debug log rotation beforehand.
     if [[ -f $debug_log_path ]]; then
-        log "  Forcing log rotation for previous debug session..."
-        local lr_conf="${RUNTIME_DIRECTORY}/${node_name}-logrotate.conf"
-        local lr_status="${RUNTIME_DIRECTORY}/${node_name}-logrotate.status"
-
-        # Temporary logrotate config
-        cat >"$lr_conf" <<EOF
-"${debug_log_path}" {
-    rotate 5
-    missingok
-    notifempty
-    copytruncate
-    compress
-    delaycompress
-}
-EOF
-        logrotate -s "$lr_status" -f "$lr_conf"
-        rm -f "$lr_conf" "$lr_status"
+        rotate_debug_log "$node_name" "$debug_log_path"
     fi
 
     log "    Launching via systemd (unit: $unit_name)"
@@ -541,9 +582,10 @@ EOF
         --unit="$unit_name" \
         --description="AosEdge Unit VM: ${node_name} (${arch})" \
         --property="EnvironmentFile=${RUNTIME_DIRECTORY}/${NETWORK_CONFIG}" \
-        --property="Environment=NETWORK_CONFIG=${NETWORK_CONFIG}" \
-        --property="Environment=DHCP_HOSTS_DIR=${DHCP_HOSTS_DIR}" \
-        --property="Environment=DNS_HOSTS_DIR=${DNS_HOSTS_DIR}" \
+        --setenv="RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" \
+        --setenv="NETWORK_CONFIG=${NETWORK_CONFIG}" \
+        --setenv="DHCP_HOSTS_DIR=${DHCP_HOSTS_DIR}" \
+        --setenv="DNS_HOSTS_DIR=${DNS_HOSTS_DIR}" \
         --slice=aos-unit.slice \
         --property="Type=simple" \
         --property="After=aos-unit.service" \
@@ -559,7 +601,6 @@ EOF
         --property="KillSignal=SIGTERM" \
         --property="TimeoutStopSec=${VM_STOP_TIMEOUT:-60s}" \
         --property="SendSIGKILL=yes" \
-        --setenv="RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" \
         --property="NoNewPrivileges=yes" \
         --property="PrivateTmp=yes" \
         --property="ProtectHome=yes" \
@@ -607,18 +648,37 @@ EOF
     log "    Access via: ssh ${node_name}.aos-unit"
 }
 
-trap 'exit 0' SIGTERM SIGINT
+launch_all_vms() {
+    log "Starting QEMU VMs..."
 
-log "AosEdge Unit Runner starting (PID: $$)"
+    local node
+    for node in "${NODES_TO_START[@]}"; do
+        local name image arch mac ip cpu mem machine cpu_type use_kvm uefi_boot
+        IFS='|' read -r name image arch mac ip cpu mem machine cpu_type use_kvm uefi_boot <<<"$node"
+        start_qemu_vm "$name" "$image" "$arch" "$mac" "$ip" "$cpu" "$mem" "$machine" "$cpu_type" "$use_kvm" "$uefi_boot"
+    done
 
-log "Starting QEMU VMs..."
+    log "All VMs started successfully"
+    log "Runner active - VMs managed by systemd"
+}
 
-for node in "${NODES_TO_START[@]}"; do
-    IFS='|' read -r name image arch mac ip cpu mem machine cpu_type use_kvm uefi_boot <<<"$node"
-    start_qemu_vm "$name" "$image" "$arch" "$mac" "$ip" "$cpu" "$mem" "$machine" "$cpu_type" "$use_kvm" "$uefi_boot"
-done
+main() {
+    HOST_ARCH="$(detect_host_arch)"
+    readonly HOST_ARCH
+    log "Host architecture: $HOST_ARCH"
 
-log "All VMs started successfully"
-log "Runner active - VMs managed by systemd"
+    parse_args "$@"
+    parse_config_file "$CONFIG_FILE" "$IMAGE_DIR"
+    validate_config
+    prepare_nodes
 
-sleep infinity
+    trap 'exit 0' SIGTERM SIGINT
+
+    log "AosEdge Unit Runner starting (PID: $$)"
+
+    launch_all_vms
+
+    sleep infinity
+}
+
+main "$@"
