@@ -4,7 +4,7 @@ Priority: optional
 Maintainer: AosEdge Team <support@aosedge.tech>
 Build-Depends: debhelper-compat (= 13)
 Standards-Version: 4.6.0
-Homepage: https://github.com/aosedge/aos_vm_tools
+Homepage: https://github.com/klogg/aos-edge-unit
 
 Package: aos-unit
 Architecture: amd64 arm64

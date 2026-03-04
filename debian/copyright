@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: AosEdge Unit
-Source: https://github.com/aosedge/aos_vm_tools
+Source: https://github.com/klogg/aos-edge-unit
 
 Files: *
 Copyright: 2018-2026 EPAM Systems Inc.
