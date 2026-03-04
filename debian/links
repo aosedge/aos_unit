@@ -1,2 +1,0 @@
-# Create user-facing symlink
-usr/libexec/aos-unit/runner usr/bin/aos-unit
