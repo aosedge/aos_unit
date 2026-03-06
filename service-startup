@@ -34,33 +34,6 @@ BRIDGE_IP=""
 DHCP_START=""
 DHCP_END=""
 
-# Rollback state flags (mutated across functions, read by rollback())
-BRIDGE_CREATED=0
-NFT_APPLIED=0
-CLEANUP_NEEDED=1
-
-rollback() {
-    local exit_code=$?
-    [[ $CLEANUP_NEEDED -eq 1 ]] || return 0
-
-    log "Startup failed (exit $exit_code). Rolling back..."
-    set +e
-
-    if [[ $NFT_APPLIED -eq 1 ]]; then
-        nft delete table inet aos_unit 2>/dev/null || true
-    fi
-
-    if ((BRIDGE_CREATED)); then
-        if command -v resolvectl >/dev/null 2>&1; then
-            resolvectl revert "$BRIDGE_NAME" 2>/dev/null || true
-        fi
-        ip link set "$BRIDGE_NAME" down 2>/dev/null || true
-        ip link delete "$BRIDGE_NAME" type bridge 2>/dev/null || ip link delete "$BRIDGE_NAME" 2>/dev/null || true
-    fi
-
-    log "Rollback complete."
-}
-
 derive_network_config() {
     local prefix="${DHCP_CIDR#*/}"
     local host_bits=$((32 - prefix))
@@ -128,7 +101,6 @@ create_bridge() {
 
     log "Creating bridge: $BRIDGE_NAME ($BRIDGE_IP)"
     ip link add "$BRIDGE_NAME" type bridge
-    BRIDGE_CREATED=1
     ip addr add "$BRIDGE_IP/${DHCP_CIDR#*/}" dev "$BRIDGE_NAME"
     ip link set "$BRIDGE_NAME" up
 }
@@ -185,7 +157,6 @@ EOF
 
     nft -c -f "$ruleset"
     nft -f "$ruleset"
-    NFT_APPLIED=1
     log "nft skeleton applied (table inet aos_unit)"
 }
 
@@ -309,15 +280,11 @@ main() {
     exec 9>"$NET_LOCK"
     flock -x 9
 
-    trap rollback EXIT
-
     create_bridge
     apply_nft_skeleton
     configure_and_start_dnsmasq
     configure_resolved_routing
 
-    CLEANUP_NEEDED=0
-    trap - EXIT ERR
     log "Startup complete"
 }
 

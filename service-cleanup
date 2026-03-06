@@ -19,7 +19,7 @@ readonly NET_LOCK="${RUNTIME_DIRECTORY}/net.lock"
 revert_resolved() {
     if command -v resolvectl >/dev/null 2>&1; then
         log "Reverting systemd-resolved settings for ${BRIDGE_NAME}"
-        resolvectl revert "$BRIDGE_NAME" || true
+        resolvectl revert "$BRIDGE_NAME" 2>/dev/null || true
     fi
 }
 
