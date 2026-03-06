@@ -20,9 +20,6 @@ readonly LOG_TAG="aos-unit:runner"
 : "${BRIDGE_IP:?BRIDGE_IP missing in $NETWORK_CONFIG}"
 : "${NETMASK:?NETMASK missing in $NETWORK_CONFIG}"
 
-readonly EXIT_CONFIG_ERROR=2
-readonly EXIT_RUNTIME_ERROR=1
-
 readonly MAC_PREFIX="52:54:00"
 readonly IMAGE_PREFIX="aos-vm-"
 
@@ -299,7 +296,7 @@ validate_static_ip() {
 
     local ip_int mask_int bridge_int net_int bcast_int
     ip_int=$(ip_to_int "$custom_ip")
-    mask_int=$(ip_to_int "$NETMASK")
+    mask_int=$(((0xFFFFFFFF << (32 - NETMASK)) & 0xFFFFFFFF))
     bridge_int=$(ip_to_int "$BRIDGE_IP")
     net_int=$(net_int_from_ip_mask "$bridge_int" "$mask_int")
     bcast_int=$(bcast_int_from_net_mask "$net_int" "$mask_int")

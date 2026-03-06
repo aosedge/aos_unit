@@ -269,11 +269,11 @@ Example: 10.200.1.1 (for DHCP_CIDR=10.200.1.0/24)
 
 .TP
 .B NETMASK
-The subnet netmask in dotted-decimal notation.
+The subnet netmask expressed as prefix.
 .br
-Calculated from the CIDR prefix length.
+Obtained from the CIDR prefix.
 .br
-Example: 255.255.255.0 (for /24)
+Example: 24 (for 255.255.255.0)
 
 .SS Availability
 This file is created during \fBExecStartPre\fR (service-startup phase) and is available to all subsequent orchestrator components via systemd's \fBEnvironmentFile\fR directive. It is automatically removed when the service stops.

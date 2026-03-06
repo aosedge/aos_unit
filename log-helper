@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+readonly EXIT_RUNTIME_ERROR=1
+readonly EXIT_CONFIG_ERROR=2
+
 : "${LOG_TAG:=aos-unit}"
 
 # Informational message (stdout)
@@ -22,7 +25,7 @@ error_multi() {
 # Log error and exit.
 # Usage:
 #   die "message"
-#   die 2 "message"
+#   die EXIT_CONFIG_ERROR "message"
 die() {
     local code=1
     if [[ ${1:-} =~ ^[0-9]+$ ]]; then
