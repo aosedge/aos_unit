@@ -12,6 +12,7 @@ service-cleanup usr/libexec/aos-unit/
 vm-failed-handler usr/libexec/aos-unit/
 dnsmasq-lease-hook usr/libexec/aos-unit/
 route-monitor usr/libexec/aos-unit/
+vm-shutdown usr/libexec/aos-unit/
 
 # Systemd units
 aos-unit.service lib/systemd/system/
@@ -30,4 +31,4 @@ aos-unit etc/logrotate.d
 
 # Documentation
 README.md usr/share/doc/aos-unit/
-vm-shutdown usr/libexec/aos-unit/
+RELEASE.md usr/share/doc/aos-unit/
