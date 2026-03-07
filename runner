@@ -665,6 +665,75 @@ launch_all_vms() {
     log "Runner active - VMs managed by systemd"
 }
 
+cleanup_route_monitor() {
+    if [[ -n ${IPMON_PID} ]]; then
+        log "Shutting down route monitor..."
+        kill "${IPMON_PID}" 2>/dev/null || true
+        wait "${IPMON_PID}" 2>/dev/null || true
+    fi
+}
+
+route_monitor_loop() {
+    local pending=0
+    local line
+
+    while true; do
+        if ((pending == 1)); then
+            # Debounce: wait for quiet time after default route event
+            if IFS= read -r -t "${DEBOUNCE_SEC}" -u "${ipmon[0]}" line; then
+                # Another route event during quiet window; reset timer
+                :
+            else
+                if kill -0 "${IPMON_PID}" 2>/dev/null; then
+                    # read timed out — changes have settled
+                    log "Route changes settled. Applying NAT rules..."
+                    "${LIBEXEC_DIR}/network-helper" add-nat || true
+                    pending=0
+                else
+                    # kill -0 failed — ip monitor died
+                    die "${EXIT_RUNTIME_ERROR}" "Error: ip monitor stream ended unexpectedly."
+                fi
+            fi
+        else
+            # Wait for default route event (blocking read)
+            if IFS= read -r -u "${ipmon[0]}" line; then
+                [[ ${line} == *"default"* ]] && pending=1
+            else
+                # Blocking read failed: could be EINTR signal OR EOF
+                if kill -0 "${IPMON_PID}" 2>/dev/null; then
+                    # Coprocess is alive -> read was likely interrupted by a signal, keep looping
+                    continue
+                else
+                    # Coprocess is dead -> EOF
+                    die "${EXIT_RUNTIME_ERROR}" "Error: ip monitor stream ended unexpectedly."
+                fi
+            fi
+        fi
+    done
+}
+
+start_route_monitoring() {
+    log "Starting route monitoring..."
+
+    # Start ip monitor as a coprocess (exec to avoid subshell)
+    coproc ipmon { exec /usr/sbin/ip monitor route; }
+    # shellcheck disable=SC2154
+    IPMON_PID="${ipmon_PID}"
+
+    # Verify coprocess started
+    if ! kill -0 "${IPMON_PID}" 2>/dev/null; then
+        die "${EXIT_RUNTIME_ERROR}" "Failed to start ip monitor coprocess"
+    fi
+
+    log "Route monitor started (PID: ${IPMON_PID})"
+
+    # Set up cleanup handler for route monitor
+    trap cleanup_route_monitor EXIT
+    trap 'exit 0' INT TERM
+
+    route_monitor_loop
+}
+
 main() {
     HOST_ARCH="$(detect_host_arch)"
     readonly HOST_ARCH
@@ -681,7 +750,11 @@ main() {
 
     launch_all_vms
 
-    sleep infinity
+    if [[ -z ${INTERNET_INTERFACE:-} ]]; then
+        start_route_monitoring
+    else
+        sleep infinity
+    fi
 }
 
 main "$@"

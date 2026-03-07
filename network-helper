@@ -30,8 +30,6 @@ readonly FORWARD_CHAIN="forward"
 readonly DHCP_HOSTS_FILE="${RUNTIME_DIRECTORY}/${DHCP_HOSTS_DIR}/hosts"
 readonly DNS_HOSTS_FILE="${RUNTIME_DIRECTORY}/${DNS_HOSTS_DIR}/hosts"
 
-readonly ROUTEMONITOR_UNIT="aos-unit-route-monitor"
-
 readonly DNS_ALT_PORT="${DNS_ALT_PORT:-5300}"
 readonly UPSTREAM_DNS="${UPSTREAM_DNS:-127.0.0.53}"
 
@@ -96,10 +94,6 @@ add_nat() {
         die "${EXIT_RUNTIME_ERROR}" "nft table ${TABLE_FAMILY} ${TABLE_NAME} not present"
     fi
 
-    if [[ "$(systemctl show -p ActiveState --value "${ROUTEMONITOR_UNIT}.service" 2>/dev/null)" == "active" ]]; then
-        die "${EXIT_RUNTIME_ERROR}" "${ROUTEMONITOR_UNIT} service is already running"
-    fi
-
     log "Configuring NAT: bridge=$BRIDGE_NAME uplink=$uplink"
 
     if ! nft -f - <<EOF; then
@@ -110,50 +104,6 @@ add rule $TABLE_FAMILY $TABLE_NAME $FORWARD_CHAIN iifname "$BRIDGE_NAME" oifname
 add rule $TABLE_FAMILY $TABLE_NAME $POSTROUTING_CHAIN oifname "$uplink" masquerade
 EOF
         die "${EXIT_RUNTIME_ERROR}" "Failed to apply nft NAT rules"
-    fi
-
-    # Spawn monitor only if not already running and no static interface forced
-    if [[ -z ${INTERNET_INTERFACE:-} ]]; then
-        log "Starting dynamic route monitoring unit: ${ROUTEMONITOR_UNIT}"
-        systemd-run \
-            --unit="${ROUTEMONITOR_UNIT}" \
-            --description="AosEdge Route Monitor (Uplink: ${uplink:-None})" \
-            --property="EnvironmentFile=${RUNTIME_DIRECTORY}/${NETWORK_CONFIG}" \
-            --setenv="RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" \
-            --setenv="NETWORK_CONFIG=${NETWORK_CONFIG}" \
-            --setenv="DHCP_HOSTS_DIR=${DHCP_HOSTS_DIR}" \
-            --setenv="DNS_HOSTS_DIR=${DNS_HOSTS_DIR}" \
-            --property="Type=simple" \
-            --property="BindsTo=aos-unit.service" \
-            --property="User=aos-unit" \
-            --property="Group=aos-unit" \
-            --property="AmbientCapabilities=CAP_NET_ADMIN" \
-            --property="CapabilityBoundingSet=CAP_NET_ADMIN" \
-            --property="RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6" \
-            --property="Restart=on-failure" \
-            --property="RestartSec=1s" \
-            --property="KillMode=control-group" \
-            --property="KillSignal=SIGTERM" \
-            --property="TimeoutStopSec=5s" \
-            --property="SendSIGKILL=yes" \
-            --property="NoNewPrivileges=yes" \
-            --property="PrivateTmp=yes" \
-            --property="ProtectSystem=strict" \
-            --property="ProtectHome=yes" \
-            --property="ProtectKernelTunables=yes" \
-            --property="ProtectKernelModules=yes" \
-            --property="ProtectControlGroups=yes" \
-            --property="ProtectKernelLogs=yes" \
-            --property="PrivateDevices=yes" \
-            --property="LockPersonality=yes" \
-            --property="MemoryDenyWriteExecute=yes" \
-            --property="RestrictNamespaces=yes" \
-            --property="RestrictRealtime=yes" \
-            --property="SystemCallArchitectures=native" \
-            --property="ReadWritePaths=${RUNTIME_DIRECTORY}" \
-            --collect \
-            --quiet -- \
-            "${LIBEXEC_DIR}/route-monitor"
     fi
 }
 
@@ -683,7 +633,6 @@ do_startup() {
 }
 
 do_cleanup() {
-    wait_for_transient_cleanup "${ROUTEMONITOR_UNIT}"
     wait_for_transient_cleanup "${DNSMASQ_UNIT}"
 
     del_nat
