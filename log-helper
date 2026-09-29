@@ -36,6 +36,79 @@ die() {
     exit "$code"
 }
 
+# Unload deadlines: dnsmasq has TimeoutStopSec=5s; VM units have
+# VM_STOP_TIMEOUT (60s default) plus ExecStopPost. Both must fit into
+# aos-unit.service TimeoutStopSec=120s when waited for from ExecStopPost.
+readonly TRANSIENT_UNLOAD_TIMEOUT_SEC=30
+readonly DNSMASQ_UNLOAD_TIMEOUT_SEC=15
+readonly NODE_UNLOAD_TIMEOUT_SEC=90
+
+# Print "<LoadState> <ActiveState>" of a unit.
+# On query failure print the systemctl error instead and return 1.
+transient_unit_state() {
+    local out key value load="" active=""
+
+    if ! out="$(systemctl show -p LoadState -p ActiveState "$1" 2>&1)"; then
+        printf '%s\n' "${out:-systemctl show failed}"
+        return 1
+    fi
+
+    while IFS='=' read -r key value; do
+        case "$key" in
+            LoadState) load="$value" ;;
+            ActiveState) active="$value" ;;
+        esac
+    done <<<"$out"
+
+    if [[ -z $load ]]; then
+        printf 'systemctl show returned no LoadState\n'
+        return 1
+    fi
+
+    printf '%s %s\n' "$load" "$active"
+}
+
+# Queue a stop without waiting for the job, so callers never block on
+# systemd job ordering and can stop several units in parallel.
+request_transient_stop() {
+    local -r unit="${1%.service}.service"
+
+    systemctl stop --no-block "$unit" >/dev/null 2>&1 || true
+    systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+}
+
+# Stop a transient unit and wait until systemd unloads it (LoadState=not-found).
+# systemd-run --collect forgets the unit name asynchronously; creating the
+# same name again before that finishes fails with "already exists".
+# Usage: wait_for_transient_cleanup UNIT [TIMEOUT_SEC]
+# Returns 1 on timeout; never exits and never touches the caller's traps.
+wait_for_transient_cleanup() {
+    local -r unit="${1%.service}.service"
+    local -r timeout_s="${2:-$TRANSIENT_UNLOAD_TIMEOUT_SEC}"
+    local -r deadline=$((SECONDS + timeout_s))
+    local state
+
+    if state="$(transient_unit_state "$unit")" && [[ $state == not-found* ]]; then
+        return 0
+    fi
+
+    log "Waiting for transient unit to unload: ${unit} (timeout ${timeout_s}s)"
+    request_transient_stop "$unit"
+
+    while ((SECONDS < deadline)); do
+        sleep 0.2
+        if state="$(transient_unit_state "$unit")"; then
+            case "$state" in
+                not-found*) return 0 ;;
+                *" failed") systemctl reset-failed "$unit" >/dev/null 2>&1 || true ;;
+            esac
+        fi
+    done
+
+    error "Transient unit ${unit} did not unload within ${timeout_s}s (last state: ${state:-unknown})"
+    return 1
+}
+
 ip_to_int() {
     local IFS=.
     local -a ipp

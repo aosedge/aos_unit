@@ -37,25 +37,9 @@ readonly DNSMASQ_UNIT="aos-unit-dnsmasq"
 
 readonly DHCP_LEASE_TIME="12h"
 
-readonly WAIT_INTERVAL=0.2
-
 lock() {
     exec 9>"$NET_LOCK"
     flock -x 9
-}
-
-wait_for_transient_cleanup() {
-    local -r unit_name="$1"
-
-    trap 'die "${EXIT_RUNTIME_ERROR}" "CRITICAL ERROR: Systemd timeout reached! ${unit_name} failed to clean up."' SIGTERM
-
-    systemctl stop "${unit_name}.service" || true
-
-    while [[ "$(systemctl show -p LoadState --value "${unit_name}.service" 2>/dev/null)" != "not-found" ]]; do
-        sleep "${WAIT_INTERVAL}"
-    done
-
-    trap - SIGTERM
 }
 
 table_present() {
@@ -112,7 +96,7 @@ del_nat() {
 
     if ! table_present; then
         log "nft table not present; nothing to remove"
-        exit 0
+        return 0
     fi
 
     log "Removing NAT rules"
@@ -486,9 +470,9 @@ configure_and_start_dnsmasq() {
     local -r conf_file="$RUNTIME_DIRECTORY/dnsmasq.conf"
     local -r leases_file="$RUNTIME_DIRECTORY/dnsmasq.leases"
 
-    if [[ "$(systemctl show -p ActiveState --value "${DNSMASQ_UNIT}.service" 2>/dev/null)" == "active" ]]; then
-        die "${EXIT_RUNTIME_ERROR}" "${DNSMASQ_UNIT} service is already running"
-    fi
+    # systemd-run --collect may still hold the name from a previous run.
+    wait_for_transient_cleanup "${DNSMASQ_UNIT}" "${DNSMASQ_UNLOAD_TIMEOUT_SEC}" ||
+        die "${EXIT_RUNTIME_ERROR}" "Leftover ${DNSMASQ_UNIT} did not unload"
 
     mkdir -p "${RUNTIME_DIRECTORY}/${DHCP_HOSTS_DIR}" "${RUNTIME_DIRECTORY}/${DNS_HOSTS_DIR}"
     touch "$DNS_HOSTS_FILE"
@@ -632,14 +616,53 @@ do_startup() {
     log "Startup complete"
 }
 
+# Failed/not-found units are prefixed with a status glyph even with --plain,
+# so match the name anywhere on the line instead of taking field 1.
+list_node_units() {
+    systemctl list-units --all --type=service --no-legend --plain 'aos-unit-node-*' 2>/dev/null |
+        grep -o 'aos-unit-node-[^[:space:]]*\.service' || true
+}
+
+# VM units need RUNTIME_DIRECTORY for their ExecStopPost, so they must be
+# gone before systemd removes it. A unit that does not unload is reported,
+# but the host network is still torn down so the next start is not blocked.
+stop_transient_units() {
+    local rc=0 unit remaining
+    local -a node_units
+
+    mapfile -t node_units < <(list_node_units)
+
+    request_transient_stop "${DNSMASQ_UNIT}"
+    for unit in "${node_units[@]}"; do
+        request_transient_stop "$unit"
+    done
+
+    local -r node_deadline=$((SECONDS + NODE_UNLOAD_TIMEOUT_SEC))
+    for unit in "${node_units[@]}"; do
+        remaining=$((node_deadline - SECONDS))
+        ((remaining > 0)) || remaining=1
+        wait_for_transient_cleanup "$unit" "$remaining" || rc="${EXIT_RUNTIME_ERROR}"
+    done
+
+    wait_for_transient_cleanup "${DNSMASQ_UNIT}" "${DNSMASQ_UNLOAD_TIMEOUT_SEC}" || rc="${EXIT_RUNTIME_ERROR}"
+
+    return "$rc"
+}
+
 do_cleanup() {
-    wait_for_transient_cleanup "${DNSMASQ_UNIT}"
+    local rc=0
+
+    stop_transient_units || rc=$?
 
     del_nat
     revert_resolved
     remove_nft_table
     remove_bridge
 
+    if ((rc != 0)); then
+        error "Cleanup complete, but some transient units did not unload"
+        return "$rc"
+    fi
     log "Cleanup complete"
 }
 
