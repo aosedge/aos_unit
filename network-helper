@@ -96,13 +96,14 @@ add_nat() {
 
     log "Configuring NAT: bridge=$BRIDGE_NAME uplink=$uplink"
 
-    if ! nft -f - <<EOF; then
+    if ! nft -f - <<EOF
 flush chain $TABLE_FAMILY $TABLE_NAME $POSTROUTING_CHAIN
 flush chain $TABLE_FAMILY $TABLE_NAME $FORWARD_CHAIN
 add rule $TABLE_FAMILY $TABLE_NAME $FORWARD_CHAIN ct state established,related accept
 add rule $TABLE_FAMILY $TABLE_NAME $FORWARD_CHAIN iifname "$BRIDGE_NAME" oifname "$uplink" accept
 add rule $TABLE_FAMILY $TABLE_NAME $POSTROUTING_CHAIN oifname "$uplink" masquerade
 EOF
+    then
         die "${EXIT_RUNTIME_ERROR}" "Failed to apply nft NAT rules"
     fi
 }

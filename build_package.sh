@@ -109,6 +109,28 @@ make_orig_tarball() {
     git archive --format=tar --prefix="${src}-${ver}/" HEAD | gzip -c >"$out"
 }
 
+fix_debian_config_file_modes() {
+    local target_dir="$1"
+    # drvfs (/mnt/c in WSL) often marks extracted files executable; debhelper
+    # then treats debian/install as a script instead of a manifest.
+    chmod -x "${target_dir}/debian/install" 2>/dev/null || true
+    if [[ -x ${target_dir}/debian/install ]]; then
+        die "Could not clear executable bit on ${target_dir}/debian/install. Use a native Linux build dir (AOS_UNIT_BUILD_DIR) or clone the repo outside /mnt/c."
+    fi
+}
+
+resolve_build_root() {
+    if [[ -n ${AOS_UNIT_BUILD_DIR:-} ]]; then
+        printf '%s\n' "$AOS_UNIT_BUILD_DIR"
+        return 0
+    fi
+    if [[ $PWD == /mnt/* ]] || [[ $(df -T "$PWD" 2>/dev/null | awk 'NR==2 {print $2}') == 9p ]]; then
+        printf '%s/aos-unit-build\n' "${XDG_CACHE_HOME:-$HOME/.cache}"
+        return 0
+    fi
+    printf '%s/build\n' "$PWD"
+}
+
 # Strict tag subject/body extraction
 get_tag_subject() {
     local tag="$1"
@@ -235,7 +257,7 @@ make_local_version() {
 }
 
 do_local() {
-    local ver subject target_dir
+    local ver subject target_dir build_root
     if [[ -z $LOCAL_DIST ]]; then
         require_cmd lsb_release
         LOCAL_DIST="$(lsb_release -cs 2>/dev/null)"
@@ -243,7 +265,8 @@ do_local() {
     fi
     ver="$(make_local_version)"
     subject="${SUBJECT:-Local build ${BASE_VERSION}}"
-    target_dir="build/src_local"
+    build_root="$(resolve_build_root)"
+    target_dir="${build_root}/src_local"
 
     echo "Package: ${PKG_NAME}"
     echo "Source: ${SRC_NAME}"
@@ -252,10 +275,14 @@ do_local() {
     echo "Base version: ${BASE_VERSION}"
     echo "Local version: ${ver}"
     echo "Distribution: ${LOCAL_DIST}"
+    if [[ $build_root != "$PWD/build" ]]; then
+        echo "Build directory: ${build_root} (repo is on drvfs; debhelper needs a native Linux filesystem)"
+    fi
 
     # Isolate the source
     mkdir -p "$target_dir"
     git archive --format=tar HEAD | tar -xf - -C "$target_dir"
+    fix_debian_config_file_modes "$target_dir"
 
     # Modify the changelog, subject only, no body
     apply_changelog_entry_fresh "$target_dir" "$ver" "$LOCAL_DIST" "low" "$subject" ""
@@ -264,7 +291,7 @@ do_local() {
     env -C "$target_dir" debuild -us -uc -b -jauto
 
     echo "Local build complete."
-    ls -lh build/"${PKG_NAME}"_"${ver}"_*.deb 2>/dev/null || true
+    ls -lh "${build_root}/${PKG_NAME}_${ver}_"*.deb 2>/dev/null || true
 }
 
 do_ppa() {
@@ -321,6 +348,7 @@ do_ppa() {
         rm -rf "$target_dir"
         mkdir -p "$target_dir"
         git archive --format=tar HEAD | tar -xf - -C "$target_dir"
+        fix_debian_config_file_modes "$target_dir"
 
         # Modify changelog and build cleanly
         apply_changelog_entry_fresh "$target_dir" "$series_version" "$series" "$urgency" "$subj" "$body"
@@ -343,6 +371,7 @@ do_ppa() {
 if [[ $DO_CLEAN == "yes" ]]; then
     echo "Cleaning build directory..."
     rm -rf ./build
+    rm -rf "${AOS_UNIT_BUILD_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/aos-unit-build}"
 fi
 
 case "$MODE" in
