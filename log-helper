@@ -5,6 +5,9 @@ readonly EXIT_CONFIG_ERROR=2
 
 : "${LOG_TAG:=aos-unit}"
 
+# Must match ConditionPathExists=/ExecCondition= in aos-unit-node@.service
+readonly NODE_START_GATE="/run/aos-unit/allow-node-start"
+
 # Informational message (stdout)
 log() {
     printf '%s: %s\n' "$LOG_TAG" "$*" >&2
@@ -34,6 +37,132 @@ die() {
     fi
     error "$*"
     exit "$code"
+}
+
+readonly UNIT_WAIT_INTERVAL=0.2
+
+# Print "<LoadState> <ActiveState>" of a unit; return 1 if systemd could not
+# be queried, so callers never mistake a D-Bus error for a state.
+unit_state() {
+    local out key value load="" active=""
+
+    out="$(systemctl show -p LoadState -p ActiveState "$1" 2>/dev/null)" || return 1
+
+    while IFS='=' read -r key value; do
+        case "$key" in
+            LoadState) load="$value" ;;
+            ActiveState) active="$value" ;;
+        esac
+    done <<<"$out"
+
+    [[ -n $load ]] || return 1
+    printf '%s %s\n' "$load" "$active"
+}
+
+# Queue a stop without waiting for the job, so callers never block on
+# systemd job ordering and several units can be stopped in parallel.
+request_unit_stop() {
+    systemctl stop --no-block "$1" >/dev/null 2>&1 || true
+}
+
+# For transient units only (systemd-run --collect): the name can be reused
+# once systemd has garbage-collected the unit, i.e. LoadState=not-found.
+# Returns 1 on timeout. Never exits and never touches the caller's traps.
+wait_for_unit_unloaded() {
+    local -r unit="$1"
+    local -r timeout_s="$2"
+    local -r deadline=$((SECONDS + timeout_s))
+    local state=""
+
+    if state="$(unit_state "$unit")" && [[ $state == not-found* ]]; then
+        return 0
+    fi
+
+    log "Waiting for transient unit to unload: ${unit} (timeout ${timeout_s}s)"
+    request_unit_stop "$unit"
+
+    while ((SECONDS < deadline)); do
+        sleep "$UNIT_WAIT_INTERVAL"
+        state="$(unit_state "$unit")" || continue
+        case "$state" in
+            not-found*) return 0 ;;
+            # A failed transient is only collected after reset-failed
+            *" failed") systemctl reset-failed "$unit" >/dev/null 2>&1 || true ;;
+        esac
+    done
+
+    error "Unit ${unit} did not unload within ${timeout_s}s (last state: ${state:-unknown})"
+    return 1
+}
+
+# For units shipped as files only: they stay loaded after stopping, so
+# ActiveState (inactive or failed) is the only signal. Never use LoadState.
+# Returns 1 on timeout. Never exits and never touches the caller's traps.
+wait_for_unit_inactive() {
+    local -r unit="$1"
+    local -r timeout_s="$2"
+    local -r deadline=$((SECONDS + timeout_s))
+    local state=""
+
+    if state="$(unit_state "$unit")" && [[ $state == *" inactive" || $state == *" failed" ]]; then
+        return 0
+    fi
+
+    log "Waiting for unit to stop: ${unit} (timeout ${timeout_s}s)"
+    request_unit_stop "$unit"
+
+    while ((SECONDS < deadline)); do
+        sleep "$UNIT_WAIT_INTERVAL"
+        state="$(unit_state "$unit")" || continue
+        case "$state" in
+            *" inactive" | *" failed") return 0 ;;
+        esac
+    done
+
+    error "Unit ${unit} did not stop within ${timeout_s}s (last state: ${state:-unknown})"
+    return 1
+}
+
+# Service names starting with PREFIX, one per line. Failed units carry a
+# status glyph even with --plain, so match the name anywhere on the line.
+list_units_by_prefix() {
+    systemctl list-units --all --type=service --no-legend --plain "${1}*" 2>/dev/null |
+        grep -o "${1}[^[:space:]]*\.service" || true
+}
+
+# Releases before the template unit ran every VM as a transient
+# aos-unit-node-<name>.service (systemd-run --collect)
+readonly LEGACY_NODE_UNIT_PREFIX="aos-unit-node-"
+# Their TimeoutStopSec=60s plus ExecStopPost
+readonly LEGACY_NODE_UNLOAD_TIMEOUT_SEC=90
+
+# Stop and unload legacy transient VM units left over from an upgrade, so
+# they never run next to the template instances that own the same guests.
+# Returns 1 if any of them did not unload in time.
+migrate_legacy_node_units() {
+    local rc=0 unit remaining
+    local -a units=()
+
+    for unit in $(list_units_by_prefix "$LEGACY_NODE_UNIT_PREFIX"); do
+        if [[ "$(systemctl show -p Transient --value "$unit" 2>/dev/null)" == "yes" ]]; then
+            units+=("$unit")
+        fi
+    done
+    ((${#units[@]})) || return 0
+
+    log "Migrating legacy transient VM units: ${units[*]}"
+    for unit in "${units[@]}"; do
+        request_unit_stop "$unit"
+    done
+
+    local -r deadline=$((SECONDS + LEGACY_NODE_UNLOAD_TIMEOUT_SEC))
+    for unit in "${units[@]}"; do
+        remaining=$((deadline - SECONDS))
+        ((remaining > 0)) || remaining=1
+        wait_for_unit_unloaded "$unit" "$remaining" || rc="${EXIT_RUNTIME_ERROR}"
+    done
+
+    return "$rc"
 }
 
 ip_to_int() {

@@ -8,16 +8,18 @@ aos-unit \- Multi-VM orchestration system for AosEdge edge deployments
 
 .SH DESCRIPTION
 .B aos-unit
-is a systemd-integrated service that orchestrates multiple QEMU/KVM virtual machines with deterministic networking, stateful logging, and automatic resource management. It is designed to run securely as an unprivileged user, launching isolated transient virtual machines for AosEdge multi-node deployments.
+is a systemd-integrated service that orchestrates multiple QEMU/KVM virtual machines with deterministic networking, stateful logging, and automatic resource management. It is designed to run securely as an unprivileged user, managing isolated virtual machines as static systemd template instances (\fIaos-unit-node@<name>.service\fR) for AosEdge multi-node deployments.
 
 .SH OPERATION
 .SS Startup Sequence
 When the \fBaos-unit\fR service is started, the system first initializes the required network environment. A unique virtual bridge is created with a name derived from the host's machine-id (\fBaosbr{machine-id:0:6}\fR). Network configuration (bridge IP, DHCP range, netmask) is automatically calculated from the configured CIDR prefix and written to a runtime configuration file (\fI/run/aos-unit/network.conf\fR). A dedicated \fBdnsmasq\fR systemd service is started to handle isolated DHCP and DNS resolution. Host \fBnftables\fR rules are also configured for routing and NAT masquerading.
 .br
-Following network initialization, the main orchestrator parses the YAML configuration. For each defined node, it provisions the required runtime files and uses \fBsystemd-run\fR to spawn the virtual machine as an independent, transient systemd service (e.g., \fIaos-unit-node-<name>.service\fR). Network helper utilities are invoked dynamically during this VM creation phase to register MAC addresses and IP allocations with the running DNS/DHCP server.
+Following network initialization, the main orchestrator parses the YAML configuration. VM units left over from a release that ran nodes as transient units (\fIaos-unit-node-<name>.service\fR) are stopped and waited for first, with a bounded timeout. The orchestrator then opens the node-start gate (\fI/run/aos-unit/allow-node-start\fR) and, for each defined node, writes the node's settings to \fI/run/aos-unit/nodes/<name>.env\fR, applies the configured CPU and memory limits with \fBsystemctl set-property\fR, and starts an instance of the packaged template unit \fIaos-unit-node@<name>.service\fR. Network helper utilities are invoked from the instance itself (\fBExecStartPre\fR / \fBExecStopPost\fR) to register and unregister MAC addresses and IP allocations with the running DNS/DHCP server.
+.PP
+Instances are bound to the manager (\fBBindsTo=aos-unit.service\fR) but deliberately not ordered after it. An instance only starts while the gate and its env file exist (\fBConditionPathExists=\fR, re-checked by \fBExecCondition=\fR); otherwise the start is skipped, not failed. Start jobs that systemd queues on its own, such as the restart propagated from a manager restart, therefore wait for the orchestrator instead of racing it.
 
 .SS Shutdown Sequence
-When the \fBaos-unit\fR service is stopped, each VM unit receives an ACPI power-down event via its QMP socket (\fBvm-shutdown\fR). The guest OS is given the configured \fBTimeoutStopSec\fR to perform a clean shutdown. If the guest does not exit within that window, systemd sends \fBSIGTERM\fR followed by \fBSIGKILL\fR. Once all VMs have halted, the orchestrator tears down the network bridge, flushes the \fBnftables\fR rules, and stops the associated \fBdnsmasq\fR and \fBroute-monitor\fR services, leaving the host system entirely clean.
+When the \fBaos-unit\fR service is stopped, the orchestrator first closes the node-start gate, so no VM can be started or restarted during teardown. Each VM unit then receives an ACPI power-down event via its QMP socket (\fBvm-shutdown\fR). The guest OS is given the configured \fBTimeoutStopSec\fR to perform a clean shutdown. If the guest does not exit within that window, systemd sends \fBSIGTERM\fR followed by \fBSIGKILL\fR; the instance ends failed and the failure is logged as "during manager stop". The cleanup waits, with a bounded timeout, until every instance is inactive, then stops the associated \fBdnsmasq\fR service, tears down the network bridge and flushes the \fBnftables\fR rules, leaving the host system entirely clean. Instance units stay loaded after the stop; only their runtime state is removed.
 
 .SH USER AND SECURITY
 The entire orchestration suite is designed to run rootless. All processes, including the main orchestrator, the network helpers, and the QEMU virtual machines, execute strictly under the \fBaos-unit\fR user and \fBaos-unit\fR group. Elevated network operations (like bridge creation) are permitted strictly within the systemd unit via specific Linux capabilities (e.g., \fBCAP_NET_ADMIN\fR), ensuring maximum host security without requiring full privileges.
@@ -60,7 +62,7 @@ All VMs are accessible via the hardcoded \fBaos-unit\fR domain suffix (e.g., \fI
 The sidecar \fBdnsmasq\fR service manages IP allocation within the automatically-derived bridge subnet. To provide internet access to the isolated edge nodes, \fBaos-unit\fR configures \fBnftables\fR to dynamically masquerade outbound traffic originating from the virtual bridge, routing it through the host's primary internet-facing interface.
 
 .SS Dynamic Route Monitoring
-A dedicated \fBroute-monitor\fR service continuously watches for changes to the host's default route via netlink. When network changes are detected (e.g., switching from Ethernet to Wi-Fi), the monitor implements a debouncing mechanism: it waits for route changes to settle (default: 2 seconds of quiet time), then triggers a single NAT rule update. This "Smart NAT" approach ensures VMs maintain uninterrupted internet connectivity even during host network transitions, while avoiding excessive rule recalculations during rapid network events.
+While \fBaos-unit.service\fR is active, \fBrunner\fR continuously watches for changes to the host's default route via netlink. When network changes are detected (e.g., switching from Ethernet to Wi-Fi), the monitor implements a debouncing mechanism: it waits for route changes to settle (default: 2 seconds of quiet time), then triggers a single NAT rule update. This "Smart NAT" approach ensures VMs maintain uninterrupted internet connectivity even during host network transitions, while avoiding excessive rule recalculations during rapid network events.
 
 .SH SYSTEM INTEGRATION
 .B aos-unit
@@ -75,7 +77,7 @@ strictly follows the Linux Filesystem Hierarchy Standard (FHS) via systemd's dir
 \fBLogs:\fR VM console and debug output are stored in \fB/var/log/aos-unit/\fR.
 
 .SS Unprivileged Execution (Polkit)
-To allow the unprivileged \fBaos-unit\fR user to launch transient systemd services and dynamically interact with the network bridge, the package installs targeted PolicyKit (polkit) rules. On Ubuntu 22.04 (jammy), the legacy .pkla format is installed to \fI/var/lib/polkit-1/localauthority/10-vendor.d/10-aos-unit.pkla\fR. On Ubuntu 24.04+ (noble, oracular), the modern JavaScript .rules format is installed to \fI/usr/share/polkit-1/rules.d/10-aos-unit.rules\fR. The package automatically selects the correct format during build time.
+To allow the unprivileged \fBaos-unit\fR user to start, stop and restart its \fIaos-unit-node@\fR instances, set their runtime resource limits, launch the transient \fBdnsmasq\fR service and dynamically interact with the network bridge, the package installs targeted PolicyKit (polkit) rules. On Ubuntu 22.04 (jammy), the legacy .pkla format is installed to \fI/var/lib/polkit-1/localauthority/10-vendor.d/10-aos-unit.pkla\fR. On Ubuntu 24.04+ (noble, oracular), the modern JavaScript .rules format is installed to \fI/usr/share/polkit-1/rules.d/10-aos-unit.rules\fR. The package automatically selects the correct format during build time.
 
 .SS IP Forwarding
 To allow NAT and bridge routing to function properly, IPv4 forwarding must be active on the host. The package automatically enables this in a persistent, Linux-native way by deploying a dedicated sysctl drop-in file (\fI/etc/sysctl.d/99-aos-unit.conf\fR).
@@ -90,7 +92,9 @@ Transient failures (e.g., QEMU crash, host bridge failure). systemd will automat
 Permanent failures (e.g., missing YAML, malformed configs, invalid CIDR). systemd will deliberately \fBNOT\fR restart the service to prevent infinite loops. Manual intervention is required.
 
 .SS VM Health Monitoring
-Individual VMs (\fIaos-unit-node-*.service\fR) manage their own restart policies. If a guest OS crashes, systemd will automatically restart that specific transient unit immediately, honoring the burst limits defined in the orchestrator.
+Individual VMs (\fIaos-unit-node@*.service\fR) manage their own restart policy: \fBRestart=on-failure\fR with \fBRestartSec=5s\fR, limited to 3 starts in 5 minutes. A QEMU crash or kill restarts that node instance only. A failure that repeats (unusable image, OOM kill under the node's memory limit, tap setup error in \fBExecStartPre\fR) is retried until the start limit is reached and the instance is then left failed. A guest that powers itself off exits cleanly and is not restarted. While the manager is stopping the node-start gate is closed, so no instance is restarted during teardown.
+.PP
+Each failed attempt, including attempts systemd then restarts, triggers \fIaos-unit-vm-failed@.service\fR, which records the unit status and journal and appends a line to \fI/var/log/aos-unit/vm-failures.log\fR. Failures while the manager is stopping (a guest that ignored the ACPI power-down) are tagged "during manager stop".
 
 .SH FILES
 .TP
@@ -102,6 +106,12 @@ Infrastructure settings (DHCP CIDR, DNS port, upstream DNS, KVM enable)
 .TP
 .I /run/aos-unit/network.conf
 Runtime-generated network configuration (bridge name, bridge IP, netmask). Created at service startup from DHCP_CIDR calculation.
+.TP
+.I /run/aos-unit/nodes/<name>.env
+Per-node runtime environment for template instances (image path, MAC, tap, CPU, memory, and related QEMU settings). Written by \fBrunner\fR before starting \fIaos-unit-node@<name>.service\fR.
+.TP
+.I /run/aos-unit/allow-node-start
+Node-start gate. Present only while the orchestrator is running; instances refuse to start without it. Created by \fBrunner\fR, removed first on shutdown.
 .TP
 .I /run/aos-unit/dnsmasq.conf
 Runtime-generated dnsmasq configuration
