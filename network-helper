@@ -17,8 +17,6 @@ readonly LOG_TAG="aos-unit:network-helper"
 : "${BRIDGE_NAME:?BRIDGE_NAME missing in $NETWORK_CONFIG}"
 : "${BRIDGE_IP:?BRIDGE_IP missing in $NETWORK_CONFIG}"
 : "${NETMASK:?NETMASK missing in $NETWORK_CONFIG}"
-: "${DHCP_START:?DHCP_START missing in $NETWORK_CONFIG}"
-: "${DHCP_END:?DHCP_END missing in $NETWORK_CONFIG}"
 
 readonly NET_LOCK="${RUNTIME_DIRECTORY}/net.lock"
 
@@ -485,6 +483,11 @@ EOF
 configure_and_start_dnsmasq() {
     local -r conf_file="$RUNTIME_DIRECTORY/dnsmasq.conf"
     local -r leases_file="$RUNTIME_DIRECTORY/dnsmasq.leases"
+
+    # v1.1.2 stored the DHCP range only in dnsmasq.conf. Requiring it at
+    # script load aborts cleanup on upgrade and leaves the bridge behind.
+    : "${DHCP_START:?DHCP_START missing in $NETWORK_CONFIG}"
+    : "${DHCP_END:?DHCP_END missing in $NETWORK_CONFIG}"
 
     if [[ "$(systemctl show -p ActiveState --value "${DNSMASQ_UNIT}.service" 2>/dev/null)" == "active" ]]; then
         die "${EXIT_RUNTIME_ERROR}" "${DNSMASQ_UNIT} service is already running"
