@@ -61,9 +61,9 @@ Congratulations! You have successfully deployed your virtual AosEdge Unit. Now y
 
 The architecture favors determinism, explicit failure semantics, and controlled recovery over opaque background behavior.
 
-* **Systemd-Native Lifecycle:** VMs are not mere background processes; each node runs as a transient systemd service unit (aos-unit-node-\<name\>.service) allowing for native monitoring, auto-restarts, and dependency management.
+* **Systemd-Native Lifecycle:** VMs are not mere background processes; each node runs as an instance of the packaged template unit aos-unit-node@\<name\>.service, allowing for native monitoring, auto-restarts, and dependency management. Because the unit names are static, restarting the manager is an ordinary systemd restart rather than a race to re-create unit names. Instances are bound to the manager (`BindsTo=`) but only start while runner holds the node-start gate (`/run/aos-unit/allow-node-start`) and has written the node's env file; any other start is skipped. Runner opens the gate when it launches the nodes and closes it first on shutdown, so no VM is started behind its back. VMs left over from releases that ran them as transient `aos-unit-node-<name>` units are stopped and replaced on the first start after an upgrade.
 * **Security-Focused Execution:** Operates as a dedicated, unprivileged aos-unit system user. Elevated network operations are handled strictly within the systemd unit via minimal Linux capabilities and specific PolicyKit rules.  
-* **Resource Management:** Per-VM CPU and memory limits are enforced via cgroups v2 unit properties. All VMs are grouped under aos-unit.slice for hierarchical control over the emulation cluster's total footprint.  
+* **Resource Management:** Per-VM CPU and memory limits from unit_config.yaml are enforced via cgroups v2, applied to each node instance at start time with systemctl set-property. All VMs are grouped under aos-unit.slice for hierarchical control over the emulation cluster's total footprint.  
 * **Portable Virtualization:** Defaults to KVM hardware acceleration for near-native performance. If /dev/kvm is unavailable, it gracefully falls back to QEMU software emulation (TCG) to enable cross-architecture testing.
 
 ### **FHS-Aligned Layout**
@@ -83,25 +83,24 @@ AosEdge Unit is implemented as a layered set of systemd units and focused helper
 systemd (host)
 ├── aos-unit.service                     # Main manager (entry point)
 │   ├── ExecStartPre: service-startup    # Bridge + nftables base + resolved routing
-│   ├── ExecStart: runner                # Parse YAML, spawn VMs + sidecars + monitors
+│   ├── ExecStart: runner                # Parse YAML, open node-start gate, start instances, monitor routes
 │   ├── (runtime): route-monitor         # Watches uplink/default-route changes via netlink
 │   ├── (runtime): network-helper        # Applies NAT rules; updated on route changes
-│   ├── ExecStop: vm-shutdown            # Send ACPI shutdown to qemu VMs
-│   └── ExecStopPost: service-cleanup    # Teardown bridge, nftables
+│   └── ExecStopPost: service-cleanup    # Close gate, wait for instances, stop aos-unit-dnsmasq, teardown bridge + nftables
 │
-├── aos-unit-dnsmasq.service             # Transient unit (DHCP + DNS on alt port)
+├── aos-unit-dnsmasq.service             # Packaged sidecar: dnsmasq (DHCP + DNS on alt port)
 │   └── dnsmasq-lease-hook               # DHCP lease event hook
-│
-├── aos-unit-route-monitor.service       # Transient unit (dynamic NAT updates)
-│   └── route-monitor                    # Debounced netlink route monitor
 │
 ├── aos-unit-vm-failed@<name>.service    # Triggered on VM node <name> failure
 │   └── vm-failed-handler                # Appends forensic data to persistent logs
 │
 └── aos-unit.slice                       # VM-only resource hierarchy
-    ├── aos-unit-node-main.service       # Transient VM unit
-    │   └── qemu-system-*                # QEMU process (KVM or TCG)
-    └── aos-unit-node-secondary.service  # Transient VM unit
+    ├── aos-unit-node@main.service       # Instance of the aos-unit-node@ template
+    │   ├── ExecStartPre: network-helper  # Register tap + DHCP reservation
+    │   ├── ExecStart: vm-launch          # Builds argv, execs qemu-system-* (KVM or TCG)
+    │   ├── ExecStop: vm-shutdown         # Send ACPI power-down via QMP
+    │   └── ExecStopPost: network-helper  # Unregister tap + DHCP reservation
+    └── aos-unit-node@secondary.service  # Instance of the aos-unit-node@ template
 ```
 
 ## **Dynamic Networking & "Smart NAT"**
@@ -112,14 +111,14 @@ Networking is not static. The host's default route may change (e.g., Ethernet �
 * **Deterministic Bridge Naming:** The virtual bridge name is automatically derived from the host's machine-id (`aosbr{machine-id:0:6}`) to ensure uniqueness without conflicts while remaining deterministic across reboots.
 * **Automatic Network Derivation:** Network configuration (bridge IP, DHCP range, netmask) is automatically calculated from a single CIDR parameter (default: 10.200.1.0/24), eliminating manual subnet management and reducing configuration errors.
 * **Host DNS integration:** Host-side resolution of VM names relies on systemd-resolved (resolvectl) being available and running.
-* **DNS Sidecar Architecture:** To avoid conflicts with systemd-resolved, the internal dnsmasq server binds to an alternate port (default 5300). Local nftables rules transparently redirect VM bridge traffic from port 53 to 5300. 
+* **DNS Sidecar Architecture:** To avoid conflicts with systemd-resolved, the internal dnsmasq server binds to an alternate port (default 5300). Local nftables rules transparently redirect VM bridge traffic from port 53 to 5300. The sidecar is the packaged unit `aos-unit-dnsmasq.service`, with no dependency on the manager. `service-startup` restarts it once its configuration is written, node instances are ordered after it, and only `service-cleanup` stops it: after every node instance is inactive and before the bridge is removed, so a running guest never loses DHCP or DNS. Older releases ran the sidecar under the same name as a transient unit; when upgrading from one of them, the package's `preinst` stops `aos-unit.service`, so the old release tears down its own sidecar, and waits, with a bounded timeout, until the transient unit is unloaded before the unit file is installed. The package's maintainer scripts start and stop only `aos-unit.service`.
 * **Deterministic Networking:** Integrated DHCP supports both static reservations and dynamic pools. MAC addresses are hashed from node names to ensure persistent network identities.
 
 ## Fail-Fast Logic & Exit Semantics
 
 AosEdge Unit deliberately separates VM-level failures from orchestrator-level failures and configuration errors.
 
-* **VM-Level Faults:** If a guest OS crashes, systemd detects the unit failure. Restart behavior is governed strictly by the transient unit's systemd policy, preventing cascading teardowns of the entire environment.  
+* **VM-Level Faults:** If a guest OS crashes, systemd detects the unit failure. Restart behavior is governed strictly by the node unit's systemd policy (`Restart=on-failure`, `RestartSec=5s`, at most 3 starts in 5 minutes), preventing cascading teardowns of the entire environment. A QEMU crash or kill is restarted; a failure that repeats (bad image, OOM under its memory limit, tap setup error) is retried until the start limit and then left failed. A guest that powers itself off is not restarted. No instance is ever restarted while the manager is stopping. Every failed attempt, including ones systemd then restarts, is logged by `OnFailure`.  
 * **Orchestrator Exit Codes (aos-unit.service):**  
   * 0: clean shutdown.  
   * 1: runtime failure (Transient errors, systemd will automatically restart).  
@@ -128,7 +127,8 @@ AosEdge Unit deliberately separates VM-level failures from orchestrator-level fa
 ### **Observability & Troubleshooting**
 
 * **Check Entire Cluster Status:**  
-  `systemctl list-units 'aos-unit-node-*'`
+  `systemctl list-units 'aos-unit-node@*'`
+* **VM Failure History:** `OnFailure` appends one line per failed instance to `/var/log/aos-unit/vm-failures.log`. Failures tagged `(during manager stop)` are guests that ignored the ACPI power-down during teardown, not crashes of a running VM.
 * **Follow Aggregated Logs:**  
   `journalctl -u 'aos-*' -f`
 * **Live Serial Console:** Connect to the live virtual UART without interrupting persistent logging:  

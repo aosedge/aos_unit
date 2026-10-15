@@ -33,29 +33,22 @@ readonly DNS_HOSTS_FILE="${RUNTIME_DIRECTORY}/${DNS_HOSTS_DIR}/hosts"
 readonly DNS_ALT_PORT="${DNS_ALT_PORT:-5300}"
 readonly UPSTREAM_DNS="${UPSTREAM_DNS:-127.0.0.53}"
 
-readonly DNSMASQ_UNIT="aos-unit-dnsmasq"
+readonly DNSMASQ_UNIT="aos-unit-dnsmasq.service"
+
+readonly NODE_UNIT_TEMPLATE="aos-unit-node@"
+
+# Node TimeoutStopSec=60s plus ExecStopPost; must fit into aos-unit.service
+# TimeoutStopSec=120s because cleanup runs as its ExecStopPost
+readonly NODE_STOP_TIMEOUT_SEC=90
+
+# aos-unit-dnsmasq.service TimeoutStopSec=5s, with margin for SIGKILL
+readonly DNSMASQ_STOP_TIMEOUT_SEC=15
 
 readonly DHCP_LEASE_TIME="12h"
-
-readonly WAIT_INTERVAL=0.2
 
 lock() {
     exec 9>"$NET_LOCK"
     flock -x 9
-}
-
-wait_for_transient_cleanup() {
-    local -r unit_name="$1"
-
-    trap 'die "${EXIT_RUNTIME_ERROR}" "CRITICAL ERROR: Systemd timeout reached! ${unit_name} failed to clean up."' SIGTERM
-
-    systemctl stop "${unit_name}.service" || true
-
-    while [[ "$(systemctl show -p LoadState --value "${unit_name}.service" 2>/dev/null)" != "not-found" ]]; do
-        sleep "${WAIT_INTERVAL}"
-    done
-
-    trap - SIGTERM
 }
 
 table_present() {
@@ -112,7 +105,7 @@ del_nat() {
 
     if ! table_present; then
         log "nft table not present; nothing to remove"
-        exit 0
+        return 0
     fi
 
     log "Removing NAT rules"
@@ -485,9 +478,18 @@ EOF
 configure_and_start_dnsmasq() {
     local -r conf_file="$RUNTIME_DIRECTORY/dnsmasq.conf"
     local -r leases_file="$RUNTIME_DIRECTORY/dnsmasq.leases"
+    local -r unit_name="$DNSMASQ_UNIT"
+    local load transient
 
-    if [[ "$(systemctl show -p ActiveState --value "${DNSMASQ_UNIT}.service" 2>/dev/null)" == "active" ]]; then
-        die "${EXIT_RUNTIME_ERROR}" "${DNSMASQ_UNIT} service is already running"
+    # Older releases ran this name as a transient unit. preinst unloads it
+    # before the unit file is installed; a name that was reloaded while the
+    # transient still existed stays bound to it until the next daemon-reload,
+    # which aos-unit cannot run, so fail instead of restarting the transient.
+    load="$(systemctl show -p LoadState --value "$unit_name" 2>/dev/null)" || load=""
+    transient="$(systemctl show -p Transient --value "$unit_name" 2>/dev/null)" || transient=""
+    if [[ $load != "loaded" || $transient != "no" ]]; then
+        die "${EXIT_RUNTIME_ERROR}" "${unit_name} is not loaded from its unit file" \
+            "(LoadState=${load:-unknown} Transient=${transient:-unknown}); reinstall aos-unit or run 'systemctl daemon-reload'"
     fi
 
     mkdir -p "${RUNTIME_DIRECTORY}/${DHCP_HOSTS_DIR}" "${RUNTIME_DIRECTORY}/${DNS_HOSTS_DIR}"
@@ -532,51 +534,19 @@ EOF
         die "${EXIT_RUNTIME_ERROR}" "dnsmasq config test failed"
     }
 
-    log "Starting dnsmasq as transient unit: ${DNSMASQ_UNIT}"
-    systemd-run \
-        --unit="$DNSMASQ_UNIT" \
-        --description="AosEdge dnsmasq @${BRIDGE_IP}" \
-        --property="EnvironmentFile=${RUNTIME_DIRECTORY}/${NETWORK_CONFIG}" \
-        --setenv="RUNTIME_DIRECTORY=${RUNTIME_DIRECTORY}" \
-        --setenv="NETWORK_CONFIG=${NETWORK_CONFIG}" \
-        --setenv="DHCP_HOSTS_DIR=${DHCP_HOSTS_DIR}" \
-        --setenv="DNS_HOSTS_DIR=${DNS_HOSTS_DIR}" \
-        --property="Type=simple" \
-        --property="BindsTo=aos-unit.service" \
-        --property="PartOf=aos-unit.service" \
-        --property="User=aos-unit" \
-        --property="Group=aos-unit" \
-        --property="AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW" \
-        --property="CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW" \
-        --property="RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6" \
-        --property="Restart=on-failure" \
-        --property="RestartSec=1s" \
-        --property="KillMode=control-group" \
-        --property="KillSignal=SIGTERM" \
-        --property="TimeoutStopSec=5s" \
-        --property="SendSIGKILL=yes" \
-        --property="NoNewPrivileges=yes" \
-        --property="PrivateTmp=yes" \
-        --property="ProtectSystem=strict" \
-        --property="ProtectHome=yes" \
-        --property="ProtectKernelTunables=yes" \
-        --property="ProtectKernelModules=yes" \
-        --property="ProtectControlGroups=yes" \
-        --property="ProtectKernelLogs=yes" \
-        --property="PrivateDevices=yes" \
-        --property="LockPersonality=yes" \
-        --property="MemoryDenyWriteExecute=yes" \
-        --property="RestrictNamespaces=yes" \
-        --property="RestrictRealtime=yes" \
-        --property="SystemCallArchitectures=native" \
-        --property="ReadWritePaths=${RUNTIME_DIRECTORY}" \
-        --collect \
-        --quiet -- \
-        /usr/sbin/dnsmasq --keep-in-foreground --conf-file="$conf_file"
+    # Conf first, then restart: restart is a serialized job on the packaged
+    # unit, so a still-running or failed instance never yields "already exists"
+    systemctl reset-failed "$unit_name" 2>/dev/null || true
 
-    if ! systemctl is-active --quiet "${DNSMASQ_UNIT}.service" 2>/dev/null; then
-        systemctl --no-pager -l status "${DNSMASQ_UNIT}.service" 2>&1 | error_multi || true
-        die "${EXIT_RUNTIME_ERROR}" "dnsmasq transient unit failed to start: ${DNSMASQ_UNIT}"
+    log "Starting dnsmasq (unit: ${unit_name})"
+    systemctl restart "$unit_name" || {
+        systemctl --no-pager -l status "$unit_name" 2>&1 | error_multi || true
+        die "${EXIT_RUNTIME_ERROR}" "Failed to start unit: ${unit_name}"
+    }
+
+    if ! systemctl is-active --quiet "$unit_name" 2>/dev/null; then
+        systemctl --no-pager -l status "$unit_name" 2>&1 | error_multi || true
+        die "${EXIT_RUNTIME_ERROR}" "dnsmasq unit failed to become active: ${unit_name}"
     fi
 }
 
@@ -632,14 +602,69 @@ do_startup() {
     log "Startup complete"
 }
 
-do_cleanup() {
-    wait_for_transient_cleanup "${DNSMASQ_UNIT}"
+# Instances are static units: they stay loaded after stopping, so wait on
+# ActiveState only. All of them share one deadline because they stop in
+# parallel.
+wait_for_node_units_cleanup() {
+    local rc=0 unit remaining
+    local -a units
 
+    mapfile -t units < <(list_units_by_prefix "$NODE_UNIT_TEMPLATE")
+
+    for unit in "${units[@]}"; do
+        request_unit_stop "$unit"
+    done
+
+    local -r deadline=$((SECONDS + NODE_STOP_TIMEOUT_SEC))
+    for unit in "${units[@]}"; do
+        remaining=$((deadline - SECONDS))
+        ((remaining > 0)) || remaining=1
+
+        # The bridge and the taps must not disappear from under a live guest
+        wait_for_unit_inactive "$unit" "$remaining" || rc="${EXIT_RUNTIME_ERROR}"
+
+        # A guest that ignored the ACPI power-down gets SIGKILLed on timeout and
+        # leaves the unit in "failed". Clear it so a plain `systemctl stop
+        # aos-unit` does not leave failed units behind for the operator to see.
+        #
+        # NOTE: the per-node MemoryMax/CPUQuota drop-ins in
+        # /run/systemd/system.control are deliberately left alone. Removing them
+        # needs `systemctl revert`, which polkit gates behind manage-unit-files
+        # (we only grant manage-units), and they are inert: runner rewrites them
+        # on every start and /run is cleared on reboot.
+        systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+    done
+
+    return "$rc"
+}
+
+do_cleanup() {
+    local rc=0
+
+    # runner closes the gate on SIGTERM; repeat it for a runner that crashed
+    # or was SIGKILLed, so no guest can start during the teardown below
+    rm -f "${NODE_START_GATE}"
+
+    wait_for_node_units_cleanup || rc=$?
+    migrate_legacy_node_units || rc=$?
+
+    # Only stopped here, after every guest is gone: a running VM must never
+    # lose DHCP/DNS. Nothing else stops the sidecar.
+    request_unit_stop "$DNSMASQ_UNIT"
+    wait_for_unit_inactive "$DNSMASQ_UNIT" "${DNSMASQ_STOP_TIMEOUT_SEC}" || rc="${EXIT_RUNTIME_ERROR}"
+    systemctl reset-failed "$DNSMASQ_UNIT" >/dev/null 2>&1 || true
+
+    # Past the deadline every guest has been SIGKILLed by its own stop
+    # timeout, so tear the network down anyway and report the failure
     del_nat
     revert_resolved
     remove_nft_table
     remove_bridge
 
+    if ((rc != 0)); then
+        error "Cleanup complete, but some node units did not stop in time"
+        return "$rc"
+    fi
     log "Cleanup complete"
 }
 

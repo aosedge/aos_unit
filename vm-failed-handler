@@ -13,8 +13,16 @@ readonly LOG_TAG="aos-unit:vm-failed"
 
 log_vm_failure() {
     local unit="$1"
+    local context=""
 
-    log "VM unit FAILED: ${unit}"
+    # A closed node-start gate means the manager is stopping, e.g. a guest that
+    # ignored the ACPI power-down and was killed on TimeoutStopSec. Still worth
+    # recording, but it must not read like a crash of a running VM.
+    if [[ ! -e $NODE_START_GATE ]]; then
+        context=" (during manager stop)"
+    fi
+
+    log "VM unit FAILED${context}: ${unit}"
     log "Writing failure marker to: ${LOGS_DIRECTORY}/vm-failures.log"
 
     log "systemctl status:"
@@ -25,7 +33,7 @@ log_vm_failure() {
 
     local ts
     ts="$(date -Is 2>/dev/null || date)"
-    echo "${ts} ${unit} failed" >>"${LOGS_DIRECTORY}/vm-failures.log"
+    echo "${ts} ${unit} failed${context}" >>"${LOGS_DIRECTORY}/vm-failures.log"
 }
 
 main() {

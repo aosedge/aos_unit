@@ -18,5 +18,12 @@ else
 endif
 	dh_missing --fail-missing
 
+# Only the manager is enabled, started and stopped by the maintainer scripts.
+# Its ExecStart/ExecStopPost own the sidecar, node and failure-handler units,
+# and the slice follows its members; starting or stopping any of them from
+# here would bypass the manager's teardown order.
+override_dh_installsystemd:
+	dh_installsystemd aos-unit.service
+
 override_dh_clean:
 	dh_clean

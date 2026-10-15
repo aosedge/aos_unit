@@ -1,0 +1,51 @@
+#!/bin/bash
+# debian/preinst - AOS Edge Unit pre-installation script
+set -e
+
+readonly DNSMASQ_UNIT="aos-unit-dnsmasq.service"
+# Old sidecar TimeoutStopSec=5s plus SIGKILL, after the manager has stopped
+readonly DNSMASQ_UNLOAD_TIMEOUT_SEC=30
+
+# Releases before the packaged sidecar ran it as a transient unit of the same
+# name. If debhelper's daemon-reload in postinst runs while that transient is
+# still loaded, systemd keeps the name bound to it, and once it is collected
+# the name stays not-found until the next daemon-reload, which aos-unit cannot
+# run. So stop the manager now: the old release then stops its own sidecar in
+# its own teardown order, and the unit file is installed only once the
+# transient is gone. postinst starts the manager again.
+unload_transient_dnsmasq() {
+    local i
+
+    [ -d /run/systemd/system ] || return 0
+    [ "$(systemctl show -p Transient --value "$DNSMASQ_UNIT" 2>/dev/null)" = "yes" ] || return 0
+
+    echo "Stopping aos-unit.service to replace the transient ${DNSMASQ_UNIT}"
+    # A failed cleanup must not abort here; whether the sidecar is gone decides
+    systemctl stop aos-unit.service || true
+
+    for ((i = 0; i < DNSMASQ_UNLOAD_TIMEOUT_SEC * 5; i++)); do
+        [ "$(systemctl show -p LoadState --value "$DNSMASQ_UNIT" 2>/dev/null)" = "not-found" ] && return 0
+        sleep 0.2
+    done
+    echo "preinst: transient ${DNSMASQ_UNIT} did not unload within ${DNSMASQ_UNLOAD_TIMEOUT_SEC}s;" \
+        "stop it and retry the upgrade" >&2
+    return 1
+}
+
+case "$1" in
+    upgrade)
+        unload_transient_dnsmasq
+        ;;
+
+    install | abort-upgrade)
+        # Nothing to do
+        ;;
+
+    *)
+        echo "preinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+exit 0
